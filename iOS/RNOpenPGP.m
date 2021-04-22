@@ -4,6 +4,11 @@
 
 @implementation RNOpenPGP
 
++ (BOOL)requiresMainQueueSetup
+{
+    return YES;
+}
+
 RCT_EXPORT_MODULE()
 
 @synthesize bridge = _bridge;
