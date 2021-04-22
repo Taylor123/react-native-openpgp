@@ -1582,34 +1582,6 @@ function bnIsProbablePrime(t) {
   return x.millerRabin(t);
 }
 
-/* added by Recurity Labs */
-
-function nbits(x) {
-  var n = 1,
-    t;
-  if ((t = x >>> 16) != 0) {
-    x = t;
-    n += 16;
-  }
-  if ((t = x >> 8) != 0) {
-    x = t;
-    n += 8;
-  }
-  if ((t = x >> 4) != 0) {
-    x = t;
-    n += 4;
-  }
-  if ((t = x >> 2) != 0) {
-    x = t;
-    n += 2;
-  }
-  if ((t = x >> 1) != 0) {
-    x = t;
-    n += 1;
-  }
-  return n;
-}
-
 function bnToMPI() {
   var ba = this.toByteArray();
   var size = (ba.length - 1) * 8 + nbits(ba[0]);
