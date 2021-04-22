@@ -9,9 +9,10 @@ React-Native-OpenPGP
 #### Installation
 
     npm install --save react-native-openpgp
+    
+    // not needed if using auto-linking RN > 0.060
     react-native link react-native-openpgp
 
-Note: Run `npm install -g rnpm` if you haven't installed RNPM (React-Native Package Manager) yet!
 Alternatively you can add the Android and iOS modules library by following the official guide.
 
 ## Usage
