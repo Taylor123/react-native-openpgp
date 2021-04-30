@@ -13,22 +13,12 @@ import java.util.List;
 public class RNOpenPGPPackage implements ReactPackage {
 
   @Override
-  public List<NativeModule> createNativeModules(
-                              ReactApplicationContext reactContext) {
-    List<NativeModule> modules = new ArrayList<>();
-
-    modules.add(new RNOpenPGPModule(reactContext));
-
-    return modules;
+  public List<NativeModule> createNativeModules(ReactApplicationContext reactContext) {
+    return Collections.<NativeModule>singletonList(new RNOpenPGPModule(reactContext));
   }
 
   @Override
   public List<ViewManager> createViewManagers(ReactApplicationContext reactContext) {
-    return Collections.emptyList();
-  }
-
-  @Override
-  public List<Class<? extends JavaScriptModule>> createJSModules() {
     return Collections.emptyList();
   }
 }
