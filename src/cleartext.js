@@ -15,176 +15,166 @@
 // License along with this library; if not, write to the Free Software
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
-/**
- * @requires config
- * @requires encoding/armor
- * @requires enums
- * @requires packet
- * @module cleartext
- */
+import { armor, unarmor } from './encoding/armor';
+import enums from './enums';
+import util from './util';
+import { PacketList, LiteralDataPacket, SignaturePacket } from './packet';
+import { Signature } from './signature';
+import { createVerificationObjects, createSignaturePackets } from './message';
+import defaultConfig from './config';
 
-'use strict';
-
-import config from './config';
-import packet from './packet';
-import enums from './enums.js';
-import armor from './encoding/armor.js';
+// A Cleartext message can contain the following packets
+const allowedPackets = /*#__PURE__*/ util.constructAllowedPackets([SignaturePacket]);
 
 /**
- * @class
- * @classdesc Class that represents an OpenPGP cleartext signed message.
- * See {@link http://tools.ietf.org/html/rfc4880#section-7}
- * @param  {String}     text       The cleartext of the signed message
- * @param  {module:packet/packetlist} packetlist The packetlist with signature packets or undefined
- *                                 if message not yet signed
+ * Class that represents an OpenPGP cleartext signed message.
+ * See {@link https://tools.ietf.org/html/rfc4880#section-7}
  */
-
-export function CleartextMessage(text, packetlist) {
-  if (!(this instanceof CleartextMessage)) {
-    return new CleartextMessage(text, packetlist);
+export class CleartextMessage {
+  /**
+   * @param {String} text - The cleartext of the signed message
+   * @param {Signature} signature - The detached signature or an empty signature for unsigned messages
+   */
+  constructor(text, signature) {
+    // normalize EOL to canonical form <CR><LF>
+    this.text = util.removeTrailingSpaces(text).replace(/\r?\n/g, '\r\n');
+    if (signature && !(signature instanceof Signature)) {
+      throw new Error('Invalid signature input');
+    }
+    this.signature = signature || new Signature(new PacketList());
   }
-  // normalize EOL to canonical form <CR><LF>
-  this.text = text.replace(/\r/g, '').replace(/[\t ]+\n/g, "\n").replace(/\n/g,"\r\n");
-  this.packets = packetlist || new packet.List();
+
+  /**
+   * Returns the key IDs of the keys that signed the cleartext message
+   * @returns {Array<module:type/keyid~KeyID>} Array of keyID objects.
+   */
+  getSigningKeyIDs() {
+    const keyIDs = [];
+    const signatureList = this.signature.packets;
+    signatureList.forEach(function(packet) {
+      keyIDs.push(packet.issuerKeyID);
+    });
+    return keyIDs;
+  }
+
+  /**
+   * Sign the cleartext message
+   * @param {Array<Key>} privateKeys - private keys with decrypted secret key data for signing
+   * @param {Signature} [signature] - Any existing detached signature
+   * @param {Array<module:type/keyid~KeyID>} [signingKeyIDs] - Array of key IDs to use for signing. Each signingKeyIDs[i] corresponds to privateKeys[i]
+   * @param {Date} [date] - The creation time of the signature that should be created
+   * @param {Array} [userIDs] - User IDs to sign with, e.g. [{ name:'Steve Sender', email:'steve@openpgp.org' }]
+   * @param {Object} [config] - Full configuration, defaults to openpgp.config
+   * @returns {Promise<CleartextMessage>} New cleartext message with signed content.
+   * @async
+   */
+  async sign(privateKeys, signature = null, signingKeyIDs = [], date = new Date(), userIDs = [], config = defaultConfig) {
+    const literalDataPacket = new LiteralDataPacket();
+    literalDataPacket.setText(this.text);
+    const newSignature = new Signature(await createSignaturePackets(literalDataPacket, privateKeys, signature, signingKeyIDs, date, userIDs, true, config));
+    return new CleartextMessage(this.text, newSignature);
+  }
+
+  /**
+   * Verify signatures of cleartext signed message
+   * @param {Array<Key>} keys - Array of keys to verify signatures
+   * @param {Date} [date] - Verify the signature against the given date, i.e. check signature creation time < date < expiration time
+   * @param {Object} [config] - Full configuration, defaults to openpgp.config
+   * @returns {Promise<Array<{
+   *   keyID: module:type/keyid~KeyID,
+   *   signature: Promise<Signature>,
+   *   verified: Promise<Boolean>
+   * }>>} List of signer's keyID and validity of signature.
+   * @async
+   */
+  verify(keys, date = new Date(), config = defaultConfig) {
+    const signatureList = this.signature.packets;
+    const literalDataPacket = new LiteralDataPacket();
+    // we assume that cleartext signature is generated based on UTF8 cleartext
+    literalDataPacket.setText(this.text);
+    return createVerificationObjects(signatureList, [literalDataPacket], keys, date, true, config);
+  }
+
+  /**
+   * Get cleartext
+   * @returns {String} Cleartext of message.
+   */
+  getText() {
+    // normalize end of line to \n
+    return this.text.replace(/\r\n/g, '\n');
+  }
+
+  /**
+   * Returns ASCII armored text of cleartext signed message
+   * @param {Object} [config] - Full configuration, defaults to openpgp.config
+   * @returns {String | ReadableStream<String>} ASCII armor.
+   */
+  armor(config = defaultConfig) {
+    let hashes = this.signature.packets.map(function(packet) {
+      return enums.read(enums.hash, packet.hashAlgorithm).toUpperCase();
+    });
+    hashes = hashes.filter(function(item, i, ar) { return ar.indexOf(item) === i; });
+    const body = {
+      hash: hashes.join(),
+      text: this.text,
+      data: this.signature.packets.write()
+    };
+    return armor(enums.armor.signed, body, undefined, undefined, undefined, config);
+  }
 }
 
 /**
- * Returns the key IDs of the keys that signed the cleartext message
- * @return {Array<module:type/keyid>} array of keyid objects
- */
-CleartextMessage.prototype.getSigningKeyIds = function() {
-  var keyIds = [];
-  var signatureList = this.packets.filterByTag(enums.packet.signature);
-  signatureList.forEach(function(packet) {
-    keyIds.push(packet.issuerKeyId);
-  });
-  return keyIds;
-};
-
-/**
- * Sign the cleartext message
- * @param  {Array<module:key~Key>} privateKeys private keys with decrypted secret key data for signing
- */
-CleartextMessage.prototype.sign = function(privateKeys) {
-  var packetlist = new packet.List();
-  var literalDataPacket = new packet.Literal();
-  literalDataPacket.setText(this.text);
-  for (var i = 0; i < privateKeys.length; i++) {
-    if (privateKeys[i].isPublic()) {
-      throw new Error('Need private key for signing');
-    }
-    var signaturePacket = new packet.Signature();
-    signaturePacket.signatureType = enums.signature.text;
-    signaturePacket.hashAlgorithm = config.prefer_hash_algorithm;
-    var signingKeyPacket = privateKeys[i].getSigningKeyPacket();
-    signaturePacket.publicKeyAlgorithm = signingKeyPacket.algorithm;
-    if (!signingKeyPacket.isDecrypted) {
-      throw new Error('Private key is not decrypted.');
-    }
-    signaturePacket.sign(signingKeyPacket, literalDataPacket);
-    packetlist.push(signaturePacket);
-  }
-  this.packets = packetlist;
-};
-
-/**
- * Verify signatures of cleartext signed message
- * @param {Array<module:key~Key>} keys array of keys to verify signatures
- * @return {Array<{keyid: module:type/keyid, valid: Boolean}>} list of signer's keyid and validity of signature
- */
-CleartextMessage.prototype.verify = function(keys) {
-  var result = [];
-  var signatureList = this.packets.filterByTag(enums.packet.signature);
-  var literalDataPacket = new packet.Literal();
-  // we assume that cleartext signature is generated based on UTF8 cleartext
-  literalDataPacket.setText(this.text);
-  for (var i = 0; i < signatureList.length; i++) {
-    var keyPacket = null;
-    for (var j = 0; j < keys.length; j++) {
-      keyPacket = keys[j].getSigningKeyPacket(signatureList[i].issuerKeyId);
-      if (keyPacket) {
-        break;
-      }
-    }
-
-    var verifiedSig = {};
-    if (keyPacket) {
-      verifiedSig.keyid = signatureList[i].issuerKeyId;
-      verifiedSig.valid = signatureList[i].verify(keyPacket, literalDataPacket);
-    } else {
-      verifiedSig.keyid = signatureList[i].issuerKeyId;
-      verifiedSig.valid = null;
-    }
-    result.push(verifiedSig);
-  }
-  return result;
-};
-
-/**
- * Get cleartext
- * @return {String} cleartext of message
- */
-CleartextMessage.prototype.getText = function() {
-  // normalize end of line to \n
-  return this.text.replace(/\r\n/g,"\n");
-};
-
-/**
- * Returns ASCII armored text of cleartext signed message
- * @return {String} ASCII armor
- */
-CleartextMessage.prototype.armor = function() {
-  var body = {
-    hash: enums.read(enums.hash, config.prefer_hash_algorithm).toUpperCase(),
-    text: this.text,
-    data: this.packets.write()
-  };
-  return armor.encode(enums.armor.signed, body);
-};
-
-
-/**
- * reads an OpenPGP cleartext signed message and returns a CleartextMessage object
- * @param {String} armoredText text to be parsed
- * @return {module:cleartext~CleartextMessage} new cleartext message object
+ * Reads an OpenPGP cleartext signed message and returns a CleartextMessage object
+ * @param {Object} options
+ * @param {String} options.cleartextMessage - Text to be parsed
+ * @param {Object} [options.config] - Custom configuration settings to overwrite those in [config]{@link module:config}
+ * @returns {Promise<CleartextMessage>} New cleartext message object.
+ * @async
  * @static
  */
-export function readArmored(armoredText) {
-  var input = armor.decode(armoredText);
+export async function readCleartextMessage({ cleartextMessage, config }) {
+  config = { ...defaultConfig, ...config };
+  if (!cleartextMessage) {
+    throw new Error('readCleartextMessage: must pass options object containing `cleartextMessage`');
+  }
+  if (!util.isString(cleartextMessage)) {
+    throw new Error('readCleartextMessage: options.cleartextMessage must be a string');
+  }
+  const input = await unarmor(cleartextMessage);
   if (input.type !== enums.armor.signed) {
     throw new Error('No cleartext signed message.');
   }
-  var packetlist = new packet.List();
-  packetlist.read(input.data);
+  const packetlist = new PacketList();
+  await packetlist.read(input.data, allowedPackets, undefined, config);
   verifyHeaders(input.headers, packetlist);
-  var newMessage = new CleartextMessage(input.text, packetlist);
-  return newMessage;
+  const signature = new Signature(packetlist);
+  return new CleartextMessage(input.text, signature);
 }
 
 /**
  * Compare hash algorithm specified in the armor header with signatures
+ * @param {Array<String>} headers - Armor headers
+ * @param {PacketList} packetlist - The packetlist with signature packets
  * @private
- * @param  {Array<String>} headers    Armor headers
- * @param  {module:packet/packetlist} packetlist The packetlist with signature packets
  */
 function verifyHeaders(headers, packetlist) {
-  var checkHashAlgos = function(hashAlgos) {
-    function check(algo) {
-      return packetlist[i].hashAlgorithm === algo;
-    }
-    for (var i = 0; i < packetlist.length; i++) {
-      if (packetlist[i].tag === enums.packet.signature && !hashAlgos.some(check)) {
+  const checkHashAlgos = function(hashAlgos) {
+    const check = packet => algo => packet.hashAlgorithm === algo;
+
+    for (let i = 0; i < packetlist.length; i++) {
+      if (packetlist[i].constructor.tag === enums.packet.signature && !hashAlgos.some(check(packetlist[i]))) {
         return false;
       }
     }
     return true;
   };
-  var oneHeader = null;
-  var hashAlgos = [];
+
+  let oneHeader = null;
+  let hashAlgos = [];
   headers.forEach(function(header) {
     oneHeader = header.match(/Hash: (.+)/); // get header value
     if (oneHeader) {
-      oneHeader = oneHeader[1].replace(/\s/g, '');  // remove whitespace
+      oneHeader = oneHeader[1].replace(/\s/g, ''); // remove whitespace
       oneHeader = oneHeader.split(',');
       oneHeader = oneHeader.map(function(hash) {
         hash = hash.toLowerCase();
@@ -199,9 +189,27 @@ function verifyHeaders(headers, packetlist) {
       throw new Error('Only "Hash" header allowed in cleartext signed message');
     }
   });
+
   if (!hashAlgos.length && !checkHashAlgos([enums.hash.md5])) {
     throw new Error('If no "Hash" header in cleartext signed message, then only MD5 signatures allowed');
-  } else if (!checkHashAlgos(hashAlgos)) {
+  } else if (hashAlgos.length && !checkHashAlgos(hashAlgos)) {
     throw new Error('Hash algorithm mismatch in armor header and signature');
   }
+}
+
+/**
+ * Creates a new CleartextMessage object from text
+ * @param {Object} options
+ * @param {String} options.text
+ * @static
+ * @async
+ */
+export async function createCleartextMessage({ text }) {
+  if (!text) {
+    throw new Error('createCleartextMessage: must pass options object containing `text`');
+  }
+  if (!util.isString(text)) {
+    throw new Error('createCleartextMessage: options.text must be a string');
+  }
+  return new CleartextMessage(text);
 }

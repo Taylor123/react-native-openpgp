@@ -15,25 +15,30 @@
 // License along with this library; if not, write to the Free Software
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
-/**
- * @requires packet/public_key
- * @requires enums
- * @module packet/public_subkey
- */
-
-'use strict';
-
-import publicKey from './public_key.js';
-import enums from '../enums.js';
+import PublicKeyPacket from './public_key';
+import enums from '../enums';
 
 /**
- * @constructor
- * @extends module:packet/public_key
+ * A Public-Subkey packet (tag 14) has exactly the same format as a
+ * Public-Key packet, but denotes a subkey.  One or more subkeys may be
+ * associated with a top-level key.  By convention, the top-level key
+ * provides signature services, and the subkeys provide encryption
+ * services.
+ * @extends PublicKeyPacket
  */
-export default function PublicSubkey() {
-  publicKey.call(this);
-  this.tag = enums.packet.publicSubkey;
+class PublicSubkeyPacket extends PublicKeyPacket {
+  static get tag() {
+    return enums.packet.publicSubkey;
+  }
+
+  /**
+   * @param {Date} [date] - Creation date
+   * @param {Object} [config] - Full configuration, defaults to openpgp.config
+   */
+  // eslint-disable-next-line no-useless-constructor
+  constructor(date, config) {
+    super(date, config);
+  }
 }
 
-PublicSubkey.prototype = new publicKey();
-PublicSubkey.prototype.constructor = PublicSubkey;
+export default PublicSubkeyPacket;

@@ -1,114 +1,156 @@
 /**
- * @requires util
- * @requires crypto/hash
- * @requires crypto/pkcs1
- * @requires crypto/public_key
- * @module crypto/signature */
+ * @fileoverview Provides functions for asymmetric signing and signature verification
+ * @module crypto/signature
+ * @private
+ */
 
-'use strict';
-
-import util from '../util';
 import publicKey from './public_key';
-import pkcs1 from './pkcs1.js';
+import enums from '../enums';
+import util from '../util';
 
-export default {
-  /**
-   *
-   * @param {module:enums.publicKey} algo public Key algorithm
-   * @param {module:enums.hash} hash_algo Hash algorithm
-   * @param {Array<module:type/mpi>} msg_MPIs Signature multiprecision integers
-   * @param {Array<module:type/mpi>} publickey_MPIs Public key multiprecision integers
-   * @param {Uint8Array} data Data on where the signature was computed on.
-   * @return {Boolean} true if signature (sig_data was equal to data over hash)
-   */
-  verify: function(algo, hash_algo, msg_MPIs, publickey_MPIs, data) {
-    var m;
-
-    data = util.Uint8Array2str(data);
-
-    switch (algo) {
-      case 1:
-        // RSA (Encrypt or Sign) [HAC]
-      case 2:
-        // RSA Encrypt-Only [HAC]
-      case 3:
-        // RSA Sign-Only [HAC]
-        var rsa = new publicKey.rsa();
-        var n = publickey_MPIs[0].toBigInteger();
-        var k = publickey_MPIs[0].byteLength();
-        var e = publickey_MPIs[1].toBigInteger();
-        m = msg_MPIs[0].toBigInteger();
-        var EM = rsa.verify(m, e, n);
-        var EM2 = pkcs1.emsa.encode(hash_algo, data, k);
-        return EM.compareTo(EM2) === 0;
-      case 16:
-        // Elgamal (Encrypt-Only) [ELGAMAL] [HAC]
-        throw new Error("signing with Elgamal is not defined in the OpenPGP standard.");
-      case 17:
-        // DSA (Digital Signature Algorithm) [FIPS186] [HAC]
-        var dsa = new publicKey.dsa();
-        var s1 = msg_MPIs[0].toBigInteger();
-        var s2 = msg_MPIs[1].toBigInteger();
-        var p = publickey_MPIs[0].toBigInteger();
-        var q = publickey_MPIs[1].toBigInteger();
-        var g = publickey_MPIs[2].toBigInteger();
-        var y = publickey_MPIs[3].toBigInteger();
-        m = data;
-        var dopublic = dsa.verify(hash_algo, s1, s2, m, p, q, g, y);
-        return dopublic.compareTo(s1) === 0;
-      default:
-        throw new Error('Invalid signature algorithm.');
+/**
+ * Parse signature in binary form to get the parameters.
+ * The returned values are only padded for EdDSA, since in the other cases their expected length
+ * depends on the key params, hence we delegate the padding to the signature verification function.
+ * See {@link https://tools.ietf.org/html/rfc4880#section-9.1|RFC 4880 9.1}
+ * See {@link https://tools.ietf.org/html/rfc4880#section-5.2.2|RFC 4880 5.2.2.}
+ * @param {module:enums.publicKey} algo - Public key algorithm
+ * @param {Uint8Array} signature - Data for which the signature was created
+ * @returns {Promise<Object>} True if signature is valid.
+ * @async
+ */
+export function parseSignatureParams(algo, signature) {
+  let read = 0;
+  switch (algo) {
+    // Algorithm-Specific Fields for RSA signatures:
+    // -  MPI of RSA signature value m**d mod n.
+    case enums.publicKey.rsaEncryptSign:
+    case enums.publicKey.rsaEncrypt:
+    case enums.publicKey.rsaSign: {
+      const s = util.readMPI(signature.subarray(read));
+      // The signature needs to be the same length as the public key modulo n.
+      // We pad s on signature verification, where we have access to n.
+      return { s };
     }
-  },
-
-  /**
-   * Create a signature on data using the specified algorithm
-   * @param {module:enums.hash} hash_algo hash Algorithm to use (See {@link http://tools.ietf.org/html/rfc4880#section-9.4|RFC 4880 9.4})
-   * @param {module:enums.publicKey} algo Asymmetric cipher algorithm to use (See {@link http://tools.ietf.org/html/rfc4880#section-9.1|RFC 4880 9.1})
-   * @param {Array<module:type/mpi>} publicMPIs Public key multiprecision integers
-   * of the private key
-   * @param {Array<module:type/mpi>} secretMPIs Private key multiprecision
-   * integers which is used to sign the data
-   * @param {Uint8Array} data Data to be signed
-   * @return {Array<module:type/mpi>}
-   */
-  sign: function(hash_algo, algo, keyIntegers, data) {
-
-    data = util.Uint8Array2str(data);
-
-    var m;
-
-    switch (algo) {
-      case 1:
-        // RSA (Encrypt or Sign) [HAC]
-      case 2:
-        // RSA Encrypt-Only [HAC]
-      case 3:
-        // RSA Sign-Only [HAC]
-        var rsa = new publicKey.rsa();
-        var d = keyIntegers[2].toBigInteger();
-        var n = keyIntegers[0].toBigInteger();
-        m = pkcs1.emsa.encode(hash_algo,
-          data, keyIntegers[0].byteLength());
-        return util.str2Uint8Array(rsa.sign(m, d, n).toMPI());
-
-      case 17:
-        // DSA (Digital Signature Algorithm) [FIPS186] [HAC]
-        var dsa = new publicKey.dsa();
-
-        var p = keyIntegers[0].toBigInteger();
-        var q = keyIntegers[1].toBigInteger();
-        var g = keyIntegers[2].toBigInteger();
-        var x = keyIntegers[4].toBigInteger();
-        m = data;
-        var result = dsa.sign(hash_algo, m, g, p, q, x);
-
-        return util.str2Uint8Array(result[0].toString() + result[1].toString());
-      case 16:
-        // Elgamal (Encrypt-Only) [ELGAMAL] [HAC]
-        throw new Error('Signing with Elgamal is not defined in the OpenPGP standard.');
-      default:
-        throw new Error('Invalid signature algorithm.');
+    // Algorithm-Specific Fields for DSA or ECDSA signatures:
+    // -  MPI of DSA or ECDSA value r.
+    // -  MPI of DSA or ECDSA value s.
+    case enums.publicKey.dsa:
+    case enums.publicKey.ecdsa:
+    {
+      const r = util.readMPI(signature.subarray(read)); read += r.length + 2;
+      const s = util.readMPI(signature.subarray(read));
+      return { r, s };
     }
+    // Algorithm-Specific Fields for EdDSA signatures:
+    // -  MPI of an EC point r.
+    // -  EdDSA value s, in MPI, in the little endian representation
+    case enums.publicKey.eddsa: {
+      // When parsing little-endian MPI data, we always need to left-pad it, as done with big-endian values:
+      // https://www.ietf.org/archive/id/draft-ietf-openpgp-rfc4880bis-10.html#section-3.2-9
+      let r = util.readMPI(signature.subarray(read)); read += r.length + 2;
+      r = util.leftPad(r, 32);
+      let s = util.readMPI(signature.subarray(read));
+      s = util.leftPad(s, 32);
+      return { r, s };
+    }
+    default:
+      throw new Error('Invalid signature algorithm.');
   }
-};
+}
+
+/**
+ * Verifies the signature provided for data using specified algorithms and public key parameters.
+ * See {@link https://tools.ietf.org/html/rfc4880#section-9.1|RFC 4880 9.1}
+ * and {@link https://tools.ietf.org/html/rfc4880#section-9.4|RFC 4880 9.4}
+ * for public key and hash algorithms.
+ * @param {module:enums.publicKey} algo - Public key algorithm
+ * @param {module:enums.hash} hashAlgo - Hash algorithm
+ * @param {Object} signature - Named algorithm-specific signature parameters
+ * @param {Object} publicParams - Algorithm-specific public key parameters
+ * @param {Uint8Array} data - Data for which the signature was created
+ * @param {Uint8Array} hashed - The hashed data
+ * @returns {Promise<Boolean>} True if signature is valid.
+ * @async
+ */
+export async function verify(algo, hashAlgo, signature, publicParams, data, hashed) {
+  switch (algo) {
+    case enums.publicKey.rsaEncryptSign:
+    case enums.publicKey.rsaEncrypt:
+    case enums.publicKey.rsaSign: {
+      const { n, e } = publicParams;
+      const s = util.leftPad(signature.s, n.length); // padding needed for webcrypto and node crypto
+      return publicKey.rsa.verify(hashAlgo, data, s, n, e, hashed);
+    }
+    case enums.publicKey.dsa: {
+      const { g, p, q, y } = publicParams;
+      const { r, s } = signature; // no need to pad, since we always handle them as BigIntegers
+      return publicKey.dsa.verify(hashAlgo, r, s, hashed, g, p, q, y);
+    }
+    case enums.publicKey.ecdsa: {
+      const { oid, Q } = publicParams;
+      const curveSize = new publicKey.elliptic.Curve(oid).payloadSize;
+      // padding needed for webcrypto
+      const r = util.leftPad(signature.r, curveSize);
+      const s = util.leftPad(signature.s, curveSize);
+      return publicKey.elliptic.ecdsa.verify(oid, hashAlgo, { r, s }, data, Q, hashed);
+    }
+    case enums.publicKey.eddsa: {
+      const { oid, Q } = publicParams;
+      // signature already padded on parsing
+      return publicKey.elliptic.eddsa.verify(oid, hashAlgo, signature, data, Q, hashed);
+    }
+    default:
+      throw new Error('Invalid signature algorithm.');
+  }
+}
+
+/**
+ * Creates a signature on data using specified algorithms and private key parameters.
+ * See {@link https://tools.ietf.org/html/rfc4880#section-9.1|RFC 4880 9.1}
+ * and {@link https://tools.ietf.org/html/rfc4880#section-9.4|RFC 4880 9.4}
+ * for public key and hash algorithms.
+ * @param {module:enums.publicKey} algo - Public key algorithm
+ * @param {module:enums.hash} hashAlgo - Hash algorithm
+ * @param {Object} publicKeyParams - Algorithm-specific public and private key parameters
+ * @param {Object} privateKeyParams - Algorithm-specific public and private key parameters
+ * @param {Uint8Array} data - Data to be signed
+ * @param {Uint8Array} hashed - The hashed data
+ * @returns {Promise<Object>} Signature                      Object containing named signature parameters.
+ * @async
+ */
+export async function sign(algo, hashAlgo, publicKeyParams, privateKeyParams, data, hashed) {
+  if (!publicKeyParams || !privateKeyParams) {
+    throw new Error('Missing key parameters');
+  }
+  switch (algo) {
+    case enums.publicKey.rsaEncryptSign:
+    case enums.publicKey.rsaEncrypt:
+    case enums.publicKey.rsaSign: {
+      const { n, e } = publicKeyParams;
+      const { d, p, q, u } = privateKeyParams;
+      const s = await publicKey.rsa.sign(hashAlgo, data, n, e, d, p, q, u, hashed);
+      return { s };
+    }
+    case enums.publicKey.dsa: {
+      const { g, p, q } = publicKeyParams;
+      const { x } = privateKeyParams;
+      return publicKey.dsa.sign(hashAlgo, hashed, g, p, q, x);
+    }
+    case enums.publicKey.elgamal: {
+      throw new Error('Signing with Elgamal is not defined in the OpenPGP standard.');
+    }
+    case enums.publicKey.ecdsa: {
+      const { oid, Q } = publicKeyParams;
+      const { d } = privateKeyParams;
+      return publicKey.elliptic.ecdsa.sign(oid, hashAlgo, data, Q, d, hashed);
+    }
+    case enums.publicKey.eddsa: {
+      const { oid, Q } = publicKeyParams;
+      const { seed } = privateKeyParams;
+      return publicKey.elliptic.eddsa.sign(oid, hashAlgo, data, Q, seed, hashed);
+    }
+    default:
+      throw new Error('Invalid signature algorithm.');
+  }
+}

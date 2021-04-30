@@ -15,146 +15,175 @@
 // License along with this library; if not, write to the Free Software
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
-/**
- * Public-Key Encrypted Session Key Packets (Tag 1)<br/>
- * <br/>
- * {@link http://tools.ietf.org/html/rfc4880#section-5.1|RFC4880 5.1}: A Public-Key Encrypted Session Key packet holds the session key
- * used to encrypt a message. Zero or more Public-Key Encrypted Session Key
- * packets and/or Symmetric-Key Encrypted Session Key packets may precede a
- * Symmetrically Encrypted Data Packet, which holds an encrypted message. The
- * message is encrypted with the session key, and the session key is itself
- * encrypted and stored in the Encrypted Session Key packet(s). The
- * Symmetrically Encrypted Data Packet is preceded by one Public-Key Encrypted
- * Session Key packet for each OpenPGP key to which the message is encrypted.
- * The recipient of the message finds a session key that is encrypted to their
- * public key, decrypts the session key, and then uses the session key to
- * decrypt the message.
- * @requires util
- * @requires crypto
- * @requires enums
- * @requires type/s2k
- * @module packet/sym_encrypted_session_key
- */
-
-'use strict';
-
-import util from '../util.js';
-import type_s2k from '../type/s2k.js';
-import enums from '../enums.js';
+import S2K from '../type/s2k';
+import defaultConfig from '../config';
 import crypto from '../crypto';
+import enums from '../enums';
+import util from '../util';
 
 /**
- * @constructor
+ * Symmetric-Key Encrypted Session Key Packets (Tag 3)
+ *
+ * {@link https://tools.ietf.org/html/rfc4880#section-5.3|RFC4880 5.3}:
+ * The Symmetric-Key Encrypted Session Key packet holds the
+ * symmetric-key encryption of a session key used to encrypt a message.
+ * Zero or more Public-Key Encrypted Session Key packets and/or
+ * Symmetric-Key Encrypted Session Key packets may precede a
+ * Symmetrically Encrypted Data packet that holds an encrypted message.
+ * The message is encrypted with a session key, and the session key is
+ * itself encrypted and stored in the Encrypted Session Key packet or
+ * the Symmetric-Key Encrypted Session Key packet.
  */
-export default function SymEncryptedSessionKey() {
-  this.tag = enums.packet.symEncryptedSessionKey;
-  this.version = 4;
-  this.sessionKey = null;
-  this.sessionKeyEncryptionAlgorithm = null;
-  this.sessionKeyAlgorithm = 'aes256';
-  this.encrypted = null;
-  this.s2k = new type_s2k();
+class SymEncryptedSessionKeyPacket {
+  static get tag() {
+    return enums.packet.symEncryptedSessionKey;
+  }
+
+  /**
+   * @param {Object} [config] - Full configuration, defaults to openpgp.config
+   */
+  constructor(config = defaultConfig) {
+    this.version = config.aeadProtect ? 5 : 4;
+    this.sessionKey = null;
+    this.sessionKeyEncryptionAlgorithm = null;
+    this.sessionKeyAlgorithm = 'aes256';
+    this.aeadAlgorithm = enums.read(enums.aead, config.preferredAEADAlgorithm);
+    this.encrypted = null;
+    this.s2k = null;
+    this.iv = null;
+  }
+
+  /**
+   * Parsing function for a symmetric encrypted session key packet (tag 3).
+   *
+   * @param {Uint8Array} bytes - Payload of a tag 3 packet
+   */
+  read(bytes) {
+    let offset = 0;
+
+    // A one-octet version number. The only currently defined version is 4.
+    this.version = bytes[offset++];
+
+    // A one-octet number describing the symmetric algorithm used.
+    const algo = enums.read(enums.symmetric, bytes[offset++]);
+
+    if (this.version === 5) {
+      // A one-octet AEAD algorithm.
+      this.aeadAlgorithm = enums.read(enums.aead, bytes[offset++]);
+    }
+
+    // A string-to-key (S2K) specifier, length as defined above.
+    this.s2k = new S2K();
+    offset += this.s2k.read(bytes.subarray(offset, bytes.length));
+
+    if (this.version === 5) {
+      const mode = crypto.mode[this.aeadAlgorithm];
+
+      // A starting initialization vector of size specified by the AEAD
+      // algorithm.
+      this.iv = bytes.subarray(offset, offset += mode.ivLength);
+    }
+
+    // The encrypted session key itself, which is decrypted with the
+    // string-to-key object. This is optional in version 4.
+    if (this.version === 5 || offset < bytes.length) {
+      this.encrypted = bytes.subarray(offset, bytes.length);
+      this.sessionKeyEncryptionAlgorithm = algo;
+    } else {
+      this.sessionKeyAlgorithm = algo;
+    }
+  }
+
+  /**
+   * Create a binary representation of a tag 3 packet
+   *
+   * @returns {Uint8Array} The Uint8Array representation.
+  */
+  write() {
+    const algo = this.encrypted === null ?
+      this.sessionKeyAlgorithm :
+      this.sessionKeyEncryptionAlgorithm;
+
+    let bytes;
+
+    if (this.version === 5) {
+      bytes = util.concatUint8Array([new Uint8Array([this.version, enums.write(enums.symmetric, algo), enums.write(enums.aead, this.aeadAlgorithm)]), this.s2k.write(), this.iv, this.encrypted]);
+    } else {
+      bytes = util.concatUint8Array([new Uint8Array([this.version, enums.write(enums.symmetric, algo)]), this.s2k.write()]);
+
+      if (this.encrypted !== null) {
+        bytes = util.concatUint8Array([bytes, this.encrypted]);
+      }
+    }
+
+    return bytes;
+  }
+
+  /**
+   * Decrypts the session key
+   * @param {String} passphrase - The passphrase in string form
+   * @throws {Error} if decryption was not successful
+   * @async
+   */
+  async decrypt(passphrase) {
+    const algo = this.sessionKeyEncryptionAlgorithm !== null ?
+      this.sessionKeyEncryptionAlgorithm :
+      this.sessionKeyAlgorithm;
+
+    const length = crypto.cipher[algo].keySize;
+    const key = await this.s2k.produceKey(passphrase, length);
+
+    if (this.version === 5) {
+      const mode = crypto.mode[this.aeadAlgorithm];
+      const adata = new Uint8Array([0xC0 | SymEncryptedSessionKeyPacket.tag, this.version, enums.write(enums.symmetric, this.sessionKeyEncryptionAlgorithm), enums.write(enums.aead, this.aeadAlgorithm)]);
+      const modeInstance = await mode(algo, key);
+      this.sessionKey = await modeInstance.decrypt(this.encrypted, this.iv, adata);
+    } else if (this.encrypted !== null) {
+      const decrypted = await crypto.mode.cfb.decrypt(algo, key, this.encrypted, new Uint8Array(crypto.cipher[algo].blockSize));
+
+      this.sessionKeyAlgorithm = enums.read(enums.symmetric, decrypted[0]);
+      this.sessionKey = decrypted.subarray(1, decrypted.length);
+    } else {
+      this.sessionKey = key;
+    }
+  }
+
+  /**
+   * Encrypts the session key
+   * @param {String} passphrase - The passphrase in string form
+   * @param {Object} [config] - Full configuration, defaults to openpgp.config
+   * @throws {Error} if encryption was not successful
+   * @async
+   */
+  async encrypt(passphrase, config = defaultConfig) {
+    const algo = this.sessionKeyEncryptionAlgorithm !== null ?
+      this.sessionKeyEncryptionAlgorithm :
+      this.sessionKeyAlgorithm;
+
+    this.sessionKeyEncryptionAlgorithm = algo;
+
+    this.s2k = new S2K(config);
+    this.s2k.salt = await crypto.random.getRandomBytes(8);
+
+    const length = crypto.cipher[algo].keySize;
+    const key = await this.s2k.produceKey(passphrase, length);
+
+    if (this.sessionKey === null) {
+      this.sessionKey = await crypto.generateSessionKey(this.sessionKeyAlgorithm);
+    }
+
+    if (this.version === 5) {
+      const mode = crypto.mode[this.aeadAlgorithm];
+      this.iv = await crypto.random.getRandomBytes(mode.ivLength); // generate new random IV
+      const adata = new Uint8Array([0xC0 | SymEncryptedSessionKeyPacket.tag, this.version, enums.write(enums.symmetric, this.sessionKeyEncryptionAlgorithm), enums.write(enums.aead, this.aeadAlgorithm)]);
+      const modeInstance = await mode(algo, key);
+      this.encrypted = await modeInstance.encrypt(this.sessionKey, this.iv, adata);
+    } else {
+      const algo_enum = new Uint8Array([enums.write(enums.symmetric, this.sessionKeyAlgorithm)]);
+      const private_key = util.concatUint8Array([algo_enum, this.sessionKey]);
+      this.encrypted = await crypto.mode.cfb.encrypt(algo, key, private_key, new Uint8Array(crypto.cipher[algo].blockSize), config);
+    }
+  }
 }
 
-/**
- * Parsing function for a symmetric encrypted session key packet (tag 3).
- *
- * @param {Uint8Array} input Payload of a tag 1 packet
- * @param {Integer} position Position to start reading from the input string
- * @param {Integer} len
- *            Length of the packet or the remaining length of
- *            input at position
- * @return {module:packet/sym_encrypted_session_key} Object representation
- */
-SymEncryptedSessionKey.prototype.read = function(bytes) {
-  // A one-octet version number. The only currently defined version is 4.
-  this.version = bytes[0];
-
-  // A one-octet number describing the symmetric algorithm used.
-  var algo = enums.read(enums.symmetric, bytes[1]);
-
-  // A string-to-key (S2K) specifier, length as defined above.
-  var s2klength = this.s2k.read(bytes.subarray(2, bytes.length));
-
-  // Optionally, the encrypted session key itself, which is decrypted
-  // with the string-to-key object.
-  var done = s2klength + 2;
-
-  if (done < bytes.length) {
-    this.encrypted = bytes.subarray(done, bytes.length);
-    this.sessionKeyEncryptionAlgorithm = algo;
-  } else {
-    this.sessionKeyAlgorithm = algo;
-  }
-};
-
-SymEncryptedSessionKey.prototype.write = function() {
-  var algo = this.encrypted === null ?
-    this.sessionKeyAlgorithm :
-    this.sessionKeyEncryptionAlgorithm;
-
-  var bytes = util.concatUint8Array([new Uint8Array([this.version, enums.write(enums.symmetric, algo)]), this.s2k.write()]);
-
-  if (this.encrypted !== null) {
-    bytes = util.concatUint8Array([bytes, this.encrypted]);
-  }
-  return bytes;
-};
-
-/**
- * Decrypts the session key (only for public key encrypted session key
- * packets (tag 1)
- *
- * @return {Uint8Array} The unencrypted session key
- */
-SymEncryptedSessionKey.prototype.decrypt = function(passphrase) {
-  var algo = this.sessionKeyEncryptionAlgorithm !== null ?
-    this.sessionKeyEncryptionAlgorithm :
-    this.sessionKeyAlgorithm;
-
-  var length = crypto.cipher[algo].keySize;
-  var key = this.s2k.produce_key(passphrase, length);
-
-  if (this.encrypted === null) {
-    this.sessionKey = key;
-
-  } else {
-    var decrypted = crypto.cfb.normalDecrypt(
-      algo, key, this.encrypted, null);
-
-    this.sessionKeyAlgorithm = enums.read(enums.symmetric,
-      decrypted[0]);
-
-    this.sessionKey = decrypted.subarray(1,decrypted.length);
-  }
-};
-
-SymEncryptedSessionKey.prototype.encrypt = function(passphrase) {
-  var algo = this.sessionKeyEncryptionAlgorithm !== null ?
-    this.sessionKeyEncryptionAlgorithm :
-    this.sessionKeyAlgorithm;
-
-  this.sessionKeyEncryptionAlgorithm = algo;
-
-  var length = crypto.cipher[algo].keySize;
-  var key = this.s2k.produce_key(passphrase, length);
-
-  var algo_enum = new Uint8Array([
-    enums.write(enums.symmetric, this.sessionKeyAlgorithm)]);
-
-  var private_key;
-  if(this.sessionKey === null) {
-    this.sessionKey = crypto.getRandomBytes(crypto.cipher[this.sessionKeyAlgorithm].keySize);
-  }
-  private_key = util.concatUint8Array([algo_enum, this.sessionKey]);
-
-  this.encrypted = crypto.cfb.normalEncrypt(
-    algo, key, private_key, null);
-};
-
-/**
- * Fix custom types after cloning
- */
-SymEncryptedSessionKey.prototype.postCloneTypeFix = function() {
-  this.s2k = type_s2k.fromClone(this.s2k);
-};
+export default SymEncryptedSessionKeyPacket;

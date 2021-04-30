@@ -1,36 +1,81 @@
 /**
- * @requires crypto/cipher/aes
- * @requires crypto/cipher/blowfish
- * @requires crypto/cipher/cast5
- * @requires crypto/cipher/twofish
+ * @fileoverview Symmetric cryptography functions
  * @module crypto/cipher
+ * @private
  */
 
-'use strict';
+import aes from './aes';
+import { DES, TripleDES } from './des.js';
+import CAST5 from './cast5';
+import TF from './twofish';
+import BF from './blowfish';
 
-import desModule from './des.js';
-import aes from './aes.js';
-import cast5 from './cast5.js';
-import twofish from './twofish.js';
-import blowfish from './blowfish.js';
-
-export default {
-  /** @see module:crypto/cipher/aes */
-  aes128: aes[128],
-  aes192: aes[192],
-  aes256: aes[256],
-  /** @see module:crypto/cipher/des.originalDes */
-  des: desModule.originalDes,
-  /** @see module:crypto/cipher/des.des */
-  tripledes: desModule.des,
-  /** @see module:crypto/cipher/cast5 */
-  cast5: cast5,
-  /** @see module:crypto/cipher/twofish */
-  twofish: twofish,
-  /** @see module:crypto/cipher/blowfish */
-  blowfish: blowfish,
-  /** Not implemented */
-  idea: function() {
-    throw new Error('IDEA symmetric-key algorithm not implemented');
-  }
+/**
+ * AES-128 encryption and decryption (ID 7)
+ * @function
+ * @param {String} key - 128-bit key
+ * @see {@link https://github.com/asmcrypto/asmcrypto.js|asmCrypto}
+ * @see {@link https://csrc.nist.gov/publications/fips/fips197/fips-197.pdf|NIST FIPS-197}
+ * @returns {Object}
+ */
+export const aes128 = aes(128);
+/**
+ * AES-128 Block Cipher (ID 8)
+ * @function
+ * @param {String} key - 192-bit key
+ * @see {@link https://github.com/asmcrypto/asmcrypto.js|asmCrypto}
+ * @see {@link https://csrc.nist.gov/publications/fips/fips197/fips-197.pdf|NIST FIPS-197}
+ * @returns {Object}
+ */
+export const aes192 = aes(192);
+/**
+ * AES-128 Block Cipher (ID 9)
+ * @function
+ * @param {String} key - 256-bit key
+ * @see {@link https://github.com/asmcrypto/asmcrypto.js|asmCrypto}
+ * @see {@link https://csrc.nist.gov/publications/fips/fips197/fips-197.pdf|NIST FIPS-197}
+ * @returns {Object}
+ */
+export const aes256 = aes(256);
+// Not in OpenPGP specifications
+export const des = DES;
+/**
+ * Triple DES Block Cipher (ID 2)
+ * @function
+ * @param {String} key - 192-bit key
+ * @see {@link https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-67r2.pdf|NIST SP 800-67}
+ * @returns {Object}
+ */
+export const tripledes = TripleDES;
+/**
+ * CAST-128 Block Cipher (ID 3)
+ * @function
+ * @param {String} key - 128-bit key
+ * @see {@link https://tools.ietf.org/html/rfc2144|The CAST-128 Encryption Algorithm}
+ * @returns {Object}
+ */
+export const cast5 = CAST5;
+/**
+ * Twofish Block Cipher (ID 10)
+ * @function
+ * @param {String} key - 256-bit key
+ * @see {@link https://tools.ietf.org/html/rfc4880#ref-TWOFISH|TWOFISH}
+ * @returns {Object}
+ */
+export const twofish = TF;
+/**
+ * Blowfish Block Cipher (ID 4)
+ * @function
+ * @param {String} key - 128-bit key
+ * @see {@link https://tools.ietf.org/html/rfc4880#ref-BLOWFISH|BLOWFISH}
+ * @returns {Object}
+ */
+export const blowfish = BF;
+/**
+ * Not implemented
+ * @function
+ * @throws {Error}
+ */
+export const idea = function() {
+  throw new Error('IDEA symmetric-key algorithm not implemented');
 };

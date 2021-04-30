@@ -15,48 +15,50 @@
 // License along with this library; if not, write to the Free Software
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
+/* eslint class-methods-use-this: ["error", { "exceptMethods": ["read"] }] */
+
+import enums from '../enums';
 
 /**
- * Implementation of the strange "Marker packet" (Tag 10)<br/>
- * <br/>
- * {@link http://tools.ietf.org/html/rfc4880#section-5.8|RFC4880 5.8}: An experimental version of PGP used this packet as the Literal
+ * Implementation of the strange "Marker packet" (Tag 10)
+ *
+ * {@link https://tools.ietf.org/html/rfc4880#section-5.8|RFC4880 5.8}:
+ * An experimental version of PGP used this packet as the Literal
  * packet, but no released version of PGP generated Literal packets with this
  * tag. With PGP 5.x, this packet has been reassigned and is reserved for use as
- * the Marker packet.<br/>
- * <br/>
- * Such a packet MUST be ignored when received.
- * @requires enums
- * @module packet/marker
+ * the Marker packet.
+ *
+ * The body of this packet consists of:
+ *   The three octets 0x50, 0x47, 0x50 (which spell "PGP" in UTF-8).
+ *
+ * Such a packet MUST be ignored when received. It may be placed at the
+ * beginning of a message that uses features not available in PGP
+ * version 2.6 in order to cause that version to report that newer
+ * software is necessary to process the message.
  */
+class MarkerPacket {
+  static get tag() {
+    return enums.packet.marker;
+  }
 
-'use strict';
+  /**
+   * Parsing function for a marker data packet (tag 10).
+   * @param {Uint8Array} bytes - Payload of a tag 10 packet
+   * @returns {Boolean} whether the packet payload contains "PGP"
+   */
+  read(bytes) {
+    if (bytes[0] === 0x50 && // P
+        bytes[1] === 0x47 && // G
+        bytes[2] === 0x50) { // P
+      return true;
+    }
+    return false;
+  }
 
-import enums from '../enums.js';
-
-/**
- * @constructor
- */
-export default function Marker() {
-  this.tag = enums.packet.marker;
+  // eslint-disable-next-line class-methods-use-this
+  write() {
+    return new Uint8Array([0x50, 0x47, 0x50]);
+  }
 }
 
-/**
- * Parsing function for a literal data packet (tag 10).
- *
- * @param {String} input Payload of a tag 10 packet
- * @param {Integer} position
- *            Position to start reading from the input string
- * @param {Integer} len
- *            Length of the packet or the remaining length of
- *            input at position
- * @return {module:packet/marker} Object representation
- */
-Marker.prototype.read = function (bytes) {
-  if (bytes[0] === 0x50 && // P
-      bytes[1] === 0x47 && // G
-      bytes[2] === 0x50) { // P
-    return true;
-  }
-  // marker packet does not contain "PGP"
-  return false;
-};
+export default MarkerPacket;

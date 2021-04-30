@@ -15,25 +15,27 @@
 // License along with this library; if not, write to the Free Software
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
-/**
- * @requires packet/secret_key
- * @requires enums
- * @module packet/secret_subkey
- */
-
-'use strict';
-
-import secretKey from './secret_key.js';
-import enums from '../enums.js';
+import SecretKeyPacket from './secret_key';
+import enums from '../enums';
+import defaultConfig from '../config';
 
 /**
- * @constructor
- * @extends module:packet/secret_key
+ * A Secret-Subkey packet (tag 7) is the subkey analog of the Secret
+ * Key packet and has exactly the same format.
+ * @extends SecretKeyPacket
  */
-export default function SecretSubkey() {
-  secretKey.call(this);
-  this.tag = enums.packet.secretSubkey;
+class SecretSubkeyPacket extends SecretKeyPacket {
+  static get tag() {
+    return enums.packet.secretSubkey;
+  }
+
+  /**
+   * @param {Date} [date] - Creation date
+   * @param {Object} [config] - Full configuration, defaults to openpgp.config
+   */
+  constructor(date = new Date(), config = defaultConfig) {
+    super(date, config);
+  }
 }
 
-SecretSubkey.prototype = new secretKey();
-SecretSubkey.prototype.constructor = SecretSubkey;
+export default SecretSubkeyPacket;

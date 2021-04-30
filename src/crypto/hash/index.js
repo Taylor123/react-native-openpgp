@@ -1,82 +1,112 @@
 /**
- * @requires crypto/hash/sha
- * @requires crypto/hash/md5
- * @requires crypto/hash/ripe-md
- * @requires util
+ * @fileoverview Provides an interface to hashing functions available in Node.js or external libraries.
+ * @see {@link https://github.com/asmcrypto/asmcrypto.js|asmCrypto}
+ * @see {@link https://github.com/indutny/hash.js|hash.js}
  * @module crypto/hash
+ * @private
  */
 
-'use strict';
+import { Sha1 } from '@openpgp/asmcrypto.js/dist_es8/hash/sha1/sha1';
+import { Sha256 } from '@openpgp/asmcrypto.js/dist_es8/hash/sha256/sha256';
+import sha224 from 'hash.js/lib/hash/sha/224';
+import sha384 from 'hash.js/lib/hash/sha/384';
+import sha512 from 'hash.js/lib/hash/sha/512';
+import { ripemd160 } from 'hash.js/lib/hash/ripemd';
+import * as stream from '@openpgp/web-stream-tools';
+import md5 from './md5';
+import util from '../../util';
+import defaultConfig from '../../config';
 
-import sha from './sha.js';
-import asmCrypto from 'asmcrypto-lite';
-import Rusha from 'rusha';
-import md5 from './md5.js';
-import ripemd from './ripe-md.js';
-import util from '../../util.js';
+const webCrypto = util.getWebCrypto();
+const nodeCrypto = util.getNodeCrypto();
 
-const rusha = new Rusha(),
-  nodeCrypto = util.getNodeCrypto(),
-  Buffer = util.getNodeBuffer();
-
-function node_hash(type) {
-  return function (data) {
-    var shasum = nodeCrypto.createHash(type);
-    shasum.update(new Buffer(data));
-    return new Uint8Array(shasum.digest());
+function nodeHash(type) {
+  return async function (data) {
+    const shasum = nodeCrypto.createHash(type);
+    return stream.transform(data, value => {
+      shasum.update(value);
+    }, () => new Uint8Array(shasum.digest()));
   };
 }
 
-var hash_fns;
-if(nodeCrypto) { // Use Node native crypto for all hash functions
-
-  hash_fns = {
-    md5: node_hash('md5'),
-    sha1: node_hash('sha1'),
-    sha224: node_hash('sha224'),
-    sha256: node_hash('sha256'),
-    sha384: node_hash('sha384'),
-    sha512: node_hash('sha512'),
-    ripemd: node_hash('ripemd160')
+function hashjsHash(hash, webCryptoHash) {
+  return async function(data, config = defaultConfig) {
+    if (stream.isArrayStream(data)) {
+      data = await stream.readToEnd(data);
+    }
+    if (!util.isStream(data) && webCrypto && webCryptoHash && data.length >= config.minBytesForWebCrypto) {
+      return new Uint8Array(await webCrypto.digest(webCryptoHash, data));
+    }
+    const hashInstance = hash();
+    return stream.transform(data, value => {
+      hashInstance.update(value);
+    }, () => new Uint8Array(hashInstance.digest()));
   };
+}
 
+function asmcryptoHash(hash, webCryptoHash) {
+  return async function(data, config = defaultConfig) {
+    if (stream.isArrayStream(data)) {
+      data = await stream.readToEnd(data);
+    }
+    if (util.isStream(data)) {
+      const hashInstance = new hash();
+      return stream.transform(data, value => {
+        hashInstance.process(value);
+      }, () => hashInstance.finish().result);
+    } else if (webCrypto && webCryptoHash && data.length >= config.minBytesForWebCrypto) {
+      return new Uint8Array(await webCrypto.digest(webCryptoHash, data));
+    } else {
+      return hash.bytes(data);
+    }
+  };
+}
+
+let hashFunctions;
+if (nodeCrypto) { // Use Node native crypto for all hash functions
+  hashFunctions = {
+    md5: nodeHash('md5'),
+    sha1: nodeHash('sha1'),
+    sha224: nodeHash('sha224'),
+    sha256: nodeHash('sha256'),
+    sha384: nodeHash('sha384'),
+    sha512: nodeHash('sha512'),
+    ripemd: nodeHash('ripemd160')
+  };
 } else { // Use JS fallbacks
-
-  hash_fns = {
-    /** @see module:crypto/hash/md5 */
+  hashFunctions = {
     md5: md5,
-    /** @see module:rusha */
-    sha1: function(data) {
-      return util.str2Uint8Array(util.hex2bin(rusha.digest(data)));
-    },
-    /** @see module:crypto/hash/sha.sha224 */
-    sha224: sha.sha224,
-    /** @see module:asmcrypto */
-    sha256: asmCrypto.SHA256.bytes,
-    /** @see module:crypto/hash/sha.sha384 */
-    sha384: sha.sha384,
-    /** @see module:crypto/hash/sha.sha512 */
-    sha512: sha.sha512,
-    /** @see module:crypto/hash/ripe-md */
-    ripemd: ripemd
+    sha1: asmcryptoHash(Sha1, navigator.userAgent.indexOf('Edge') === -1 && 'SHA-1'),
+    sha224: hashjsHash(sha224),
+    sha256: asmcryptoHash(Sha256, 'SHA-256'),
+    sha384: hashjsHash(sha384, 'SHA-384'),
+    sha512: hashjsHash(sha512, 'SHA-512'), // asmcrypto sha512 is huge.
+    ripemd: hashjsHash(ripemd160)
   };
 }
 
 export default {
 
-  md5: hash_fns.md5,
-  sha1: hash_fns.sha1,
-  sha224: hash_fns.sha224,
-  sha256: hash_fns.sha256,
-  sha384: hash_fns.sha384,
-  sha512: hash_fns.sha512,
-  ripemd: hash_fns.ripemd,
+  /** @see module:md5 */
+  md5: hashFunctions.md5,
+  /** @see asmCrypto */
+  sha1: hashFunctions.sha1,
+  /** @see hash.js */
+  sha224: hashFunctions.sha224,
+  /** @see asmCrypto */
+  sha256: hashFunctions.sha256,
+  /** @see hash.js */
+  sha384: hashFunctions.sha384,
+  /** @see asmCrypto */
+  sha512: hashFunctions.sha512,
+  /** @see hash.js */
+  ripemd: hashFunctions.ripemd,
 
   /**
    * Create a hash on the specified data using the specified algorithm
-   * @param {module:enums.hash} algo Hash algorithm type (see {@link http://tools.ietf.org/html/rfc4880#section-9.4|RFC 4880 9.4})
-   * @param {Uint8Array} data Data to be hashed
-   * @return {Uint8Array} hash value
+   * @param {module:enums.hash} algo - Hash algorithm type (see {@link https://tools.ietf.org/html/rfc4880#section-9.4|RFC 4880 9.4})
+   * @param {Uint8Array} data - Data to be hashed
+   * @returns {Promise<Uint8Array>} Hash value.
    */
   digest: function(algo, data) {
     switch (algo) {
@@ -108,30 +138,23 @@ export default {
 
   /**
    * Returns the hash size in bytes of the specified hash algorithm type
-   * @param {module:enums.hash} algo Hash algorithm type (See {@link http://tools.ietf.org/html/rfc4880#section-9.4|RFC 4880 9.4})
-   * @return {Integer} Size in bytes of the resulting hash
+   * @param {module:enums.hash} algo - Hash algorithm type (See {@link https://tools.ietf.org/html/rfc4880#section-9.4|RFC 4880 9.4})
+   * @returns {Integer} Size in bytes of the resulting hash.
    */
   getHashByteLength: function(algo) {
     switch (algo) {
-      case 1:
-        // - MD5 [HAC]
+      case 1: // - MD5 [HAC]
         return 16;
-      case 2:
-        // - SHA-1 [FIPS180]
-      case 3:
-        // - RIPE-MD/160 [HAC]
+      case 2: // - SHA-1 [FIPS180]
+      case 3: // - RIPE-MD/160 [HAC]
         return 20;
-      case 8:
-        // - SHA256 [FIPS180]
+      case 8: // - SHA256 [FIPS180]
         return 32;
-      case 9:
-        // - SHA384 [FIPS180]
+      case 9: // - SHA384 [FIPS180]
         return 48;
-      case 10:
-        // - SHA512 [FIPS180]
+      case 10: // - SHA512 [FIPS180]
         return 64;
-      case 11:
-        // - SHA224 [FIPS180]
+      case 11: // - SHA224 [FIPS180]
         return 28;
       default:
         throw new Error('Invalid hash algorithm.');

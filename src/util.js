@@ -15,18 +15,20 @@
 // License along with this library; if not, write to the Free Software
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
+/* eslint-disable no-console */
+
 /**
  * This object contains utility functions
- * @requires config
  * @module util
+ * @private
  */
 
-'use strict';
+import * as stream from '@openpgp/web-stream-tools';
+import { getBigInteger } from './biginteger';
 
-import config from './config';
+const debugMode = globalThis.process && globalThis.process.env.NODE_ENV === 'development';
 
-export default {
-
+const util = {
   isString: function(data) {
     return typeof data === 'string' || String.prototype.isPrototypeOf(data);
   },
@@ -35,68 +37,21 @@ export default {
     return Array.prototype.isPrototypeOf(data);
   },
 
-  isUint8Array: function(data) {
-    return Uint8Array.prototype.isPrototypeOf(data);
-  },
+  isUint8Array: stream.isUint8Array,
 
-  isEmailAddress: function(data) {
-    if (!this.isString(data)) {
-      return false;
-    }
-    const re = /^(([^<>()[\]\\.,;:\s@\"]+(\.[^<>()[\]\\.,;:\s@\"]+)*)|(\".+\"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/;
-    return re.test(data);
-  },
-
-  isUserId: function(data) {
-    if (!this.isString(data)) {
-      return false;
-    }
-    return / </.test(data) && />$/.test(data);
-  },
-
-  /**
-   * Get transferable objects to pass buffers with zero copy (similar to "pass by reference" in C++)
-   *   See: https://developer.mozilla.org/en-US/docs/Web/API/Worker/postMessage
-   * @param  {Object} obj           the options object to be passed to the web worker
-   * @return {Array<ArrayBuffer>}   an array of binary data to be passed
-   */
-  getTransferables: function(obj) {
-    if (config.zeroCopy && Object.prototype.isPrototypeOf(obj)) {
-      const transferables = [];
-      this.collectBuffers(obj, transferables);
-      return transferables.length ? transferables : undefined;
-    }
-  },
-
-  collectBuffers: function(obj, collection) {
-    if (!obj) {
-      return;
-    }
-    if (this.isUint8Array(obj) && collection.indexOf(obj.buffer) === -1) {
-      collection.push(obj.buffer);
-      return;
-    }
-    if (Object.prototype.isPrototypeOf(obj)) {
-      for (let key in obj) { // recursively search all children
-        this.collectBuffers(obj[key], collection);
-      }
-    }
-  },
+  isStream: stream.isStream,
 
   readNumber: function (bytes) {
-    var n = 0;
-
-    for (var i = 0; i < bytes.length; i++) {
-      n <<= 8;
-      n += bytes[i];
+    let n = 0;
+    for (let i = 0; i < bytes.length; i++) {
+      n += (256 ** i) * bytes[bytes.length - 1 - i];
     }
-
     return n;
   },
 
   writeNumber: function (n, bytes) {
-    var b = new Uint8Array(bytes);
-    for (var i = 0; i < bytes; i++) {
+    const b = new Uint8Array(bytes);
+    for (let i = 0; i < bytes; i++) {
       b[i] = (n >> (8 * (bytes - i - 1))) & 0xFF;
     }
 
@@ -104,53 +59,100 @@ export default {
   },
 
   readDate: function (bytes) {
-    var n = this.readNumber(bytes);
-    var d = new Date();
-    d.setTime(n * 1000);
+    const n = util.readNumber(bytes);
+    const d = new Date(n * 1000);
     return d;
   },
 
   writeDate: function (time) {
-    var numeric = Math.round(time.getTime() / 1000);
+    const numeric = Math.floor(time.getTime() / 1000);
 
-    return this.writeNumber(numeric, 4);
+    return util.writeNumber(numeric, 4);
   },
 
-  hexdump: function (str) {
-    var r = [];
-    var e = str.length;
-    var c = 0;
-    var h;
-    var i = 0;
-    while (c < e) {
-      h = str.charCodeAt(c++).toString(16);
-      while (h.length < 2) {
-        h = "0" + h;
-      }
-      r.push(" " + h);
-      i++;
-      if (i % 32 === 0) {
-        r.push("\n           ");
-      }
-    }
-    return r.join('');
+  normalizeDate: function (time = Date.now()) {
+    return time === null || time === Infinity ? time : new Date(Math.floor(+time / 1000) * 1000);
   },
 
   /**
-   * Create hexstring from a binary
-   * @param {String} str String to convert
-   * @return {String} String containing the hexadecimal values
+   * Read one MPI from bytes in input
+   * @param {Uint8Array} bytes - Input data to parse
+   * @returns {Uint8Array} Parsed MPI.
    */
-  hexstrdump: function (str) {
-    if (str === null) {
-      return "";
+  readMPI: function (bytes) {
+    const bits = (bytes[0] << 8) | bytes[1];
+    const bytelen = (bits + 7) >>> 3;
+    return bytes.subarray(2, 2 + bytelen);
+  },
+
+  /**
+   * Left-pad Uint8Array to length by adding 0x0 bytes
+   * @param {Uint8Array} bytes - Data to pad
+   * @param {Number} length - Padded length
+   * @returns {Uint8Array} Padded bytes.
+   */
+  leftPad(bytes, length) {
+    const padded = new Uint8Array(length);
+    const offset = length - bytes.length;
+    padded.set(bytes, offset);
+    return padded;
+  },
+
+  /**
+   * Convert a Uint8Array to an MPI-formatted Uint8Array.
+   * @param {Uint8Array} bin - An array of 8-bit integers to convert
+   * @returns {Uint8Array} MPI-formatted Uint8Array.
+   */
+  uint8ArrayToMPI: function (bin) {
+    const bitSize = util.uint8ArrayBitLength(bin);
+    if (bitSize === 0) {
+      throw new Error('Zero MPI');
     }
-    var r = [];
-    var e = str.length;
-    var c = 0;
-    var h;
+    const stripped = bin.subarray(bin.length - Math.ceil(bitSize / 8));
+    const prefix = Uint8Array.from([(bitSize & 0xFF00) >> 8, bitSize & 0xFF]);
+    return util.concatUint8Array([prefix, stripped]);
+  },
+
+  /**
+   * Return bit length of the input data
+   * @param {Uint8Array} bin input data (big endian)
+   * @returns bit length
+   */
+  uint8ArrayBitLength: function (bin) {
+    let i; // index of leading non-zero byte
+    for (i = 0; i < bin.length; i++) if (bin[i] !== 0) break;
+    if (i === bin.length) {
+      return 0;
+    }
+    const stripped = bin.subarray(i);
+    return (stripped.length - 1) * 8 + util.nbits(stripped[0]);
+  },
+
+  /**
+   * Convert a hex string to an array of 8-bit integers
+   * @param {String} hex - A hex string to convert
+   * @returns {Uint8Array} An array of 8-bit integers.
+   */
+  hexToUint8Array: function (hex) {
+    const result = new Uint8Array(hex.length >> 1);
+    for (let k = 0; k < hex.length >> 1; k++) {
+      result[k] = parseInt(hex.substr(k << 1, 2), 16);
+    }
+    return result;
+  },
+
+  /**
+   * Convert an array of 8-bit integers to a hex string
+   * @param {Uint8Array} bytes - Array of 8-bit integers to convert
+   * @returns {String} Hexadecimal representation of the array.
+   */
+  uint8ArrayToHex: function (bytes) {
+    const r = [];
+    const e = bytes.length;
+    let c = 0;
+    let h;
     while (c < e) {
-      h = str.charCodeAt(c++).toString(16);
+      h = bytes[c++].toString(16);
       while (h.length < 2) {
         h = "0" + h;
       }
@@ -160,187 +162,101 @@ export default {
   },
 
   /**
-   * Create binary string from a hex encoded string
-   * @param {String} str Hex string to convert
-   * @return {String} String containing the binary values
+   * Convert a string to an array of 8-bit integers
+   * @param {String} str - String to convert
+   * @returns {Uint8Array} An array of 8-bit integers.
    */
-  hex2bin: function (hex) {
-    var str = '';
-    for (var i = 0; i < hex.length; i += 2) {
-      str += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
-    }
-    return str;
-  },
-
-  /**
-   * Creating a hex string from an binary array of integers (0..255)
-   * @param {String} str Array of bytes to convert
-   * @return {String} Hexadecimal representation of the array
-   */
-  hexidump: function (str) {
-    var r = [];
-    var e = str.length;
-    var c = 0;
-    var h;
-    while (c < e) {
-      h = str[c++].toString(16);
-      while (h.length < 2) {
-        h = "0" + h;
+  stringToUint8Array: function (str) {
+    return stream.transform(str, str => {
+      if (!util.isString(str)) {
+        throw new Error('stringToUint8Array: Data must be in the form of a string');
       }
-      r.push("" + h);
-    }
-    return r.join('');
-  },
 
-
-  /**
-   * Convert a native javascript string to a string of utf8 bytes
-   * @param {String} str The string to convert
-   * @return {String} A valid squence of utf8 bytes
-   */
-  encode_utf8: function (str) {
-    return unescape(encodeURIComponent(str));
+      const result = new Uint8Array(str.length);
+      for (let i = 0; i < str.length; i++) {
+        result[i] = str.charCodeAt(i);
+      }
+      return result;
+    });
   },
 
   /**
-   * Convert a string of utf8 bytes to a native javascript string
-   * @param {String} utf8 A valid squence of utf8 bytes
-   * @return {String} A native javascript string
+   * Convert an array of 8-bit integers to a string
+   * @param {Uint8Array} bytes - An array of 8-bit integers to convert
+   * @returns {String} String representation of the array.
    */
-  decode_utf8: function (utf8) {
-    if (typeof utf8 !== 'string') {
-      throw new Error('Parameter "utf8" is not of type string');
-    }
-    try {
-      return decodeURIComponent(escape(utf8));
-    } catch (e) {
-      return utf8;
-    }
-  },
+  uint8ArrayToString: function (bytes) {
+    bytes = new Uint8Array(bytes);
+    const result = [];
+    const bs = 1 << 14;
+    const j = bytes.length;
 
-  /**
-   * Convert an array of integers(0.255) to a string
-   * @param {Array<Integer>} bin An array of (binary) integers to convert
-   * @return {String} The string representation of the array
-   */
-  bin2str: function (bin) {
-    var result = [];
-    for (var i = 0; i < bin.length; i++) {
-      result[i] = String.fromCharCode(bin[i]);
+    for (let i = 0; i < j; i += bs) {
+      result.push(String.fromCharCode.apply(String, bytes.subarray(i, i + bs < j ? i + bs : j)));
     }
     return result.join('');
   },
 
   /**
-   * Convert a string to an array of integers(0.255)
-   * @param {String} str String to convert
-   * @return {Array<Integer>} An array of (binary) integers
+   * Convert a native javascript string to a Uint8Array of utf8 bytes
+   * @param {String|ReadableStream} str - The string to convert
+   * @returns {Uint8Array|ReadableStream} A valid squence of utf8 bytes.
    */
-  str2bin: function (str) {
-    var result = [];
-    for (var i = 0; i < str.length; i++) {
-      result[i] = str.charCodeAt(i);
+  encodeUTF8: function (str) {
+    const encoder = new TextEncoder('utf-8');
+    // eslint-disable-next-line no-inner-declarations
+    function process(value, lastChunk = false) {
+      return encoder.encode(value, { stream: !lastChunk });
     }
-    return result;
-  },
-
-
-  /**
-   * Convert a string to a Uint8Array
-   * @param {String} str String to convert
-   * @return {Uint8Array} The array of (binary) integers
-   */
-  str2Uint8Array: function (str) {
-    if(typeof str !== 'string' && !String.prototype.isPrototypeOf(str)) {
-      throw new Error('str2Uint8Array: Data must be in the form of a string');
-    }
-
-    var result = new Uint8Array(str.length);
-    for (var i = 0; i < str.length; i++) {
-      result[i] = str.charCodeAt(i);
-    }
-    return result;
+    return stream.transform(str, process, () => process('', true));
   },
 
   /**
-   * Convert a Uint8Array to a string. This currently functions
-   * the same as bin2str.
-   * @function module:util.Uint8Array2str
-   * @param {Uint8Array} bin An array of (binary) integers to convert
-   * @return {String} String representation of the array
+   * Convert a Uint8Array of utf8 bytes to a native javascript string
+   * @param {Uint8Array|ReadableStream} utf8 - A valid squence of utf8 bytes
+   * @returns {String|ReadableStream} A native javascript string.
    */
-  Uint8Array2str: function (bin) {
-    if(!Uint8Array.prototype.isPrototypeOf(bin)) {
-      throw new Error('Uint8Array2str: Data must be in the form of a Uint8Array');
+  decodeUTF8: function (utf8) {
+    const decoder = new TextDecoder('utf-8');
+    // eslint-disable-next-line no-inner-declarations
+    function process(value, lastChunk = false) {
+      return decoder.decode(value, { stream: !lastChunk });
     }
-
-    var result = [];
-    for (var i = 0; i < bin.length; i++) {
-      result[i] = String.fromCharCode(bin[i]);
-    }
-    return result.join('');
+    return stream.transform(utf8, process, () => process(new Uint8Array(), true));
   },
 
   /**
-   * Concat Uint8arrays
-   * @function module:util.concatUint8Array
-   * @param {Array<Uint8array>} Array of Uint8Arrays to concatenate
-   * @return {Uint8array} Concatenated array
+   * Concat a list of Uint8Arrays, Strings or Streams
+   * The caller must not mix Uint8Arrays with Strings, but may mix Streams with non-Streams.
+   * @param {Array<Uint8Array|String|ReadableStream>} Array - Of Uint8Arrays/Strings/Streams to concatenate
+   * @returns {Uint8Array|String|ReadableStream} Concatenated array.
    */
-  concatUint8Array: function (arrays) {
-    var totalLength = 0;
-    arrays.forEach(function (element) {
-      if(!Uint8Array.prototype.isPrototypeOf(element)) {
-        throw new Error('concatUint8Array: Data must be in the form of a Uint8Array');
-      }
-
-      totalLength += element.length;
-    });
-
-    var result = new Uint8Array(totalLength);
-    var pos = 0;
-    arrays.forEach(function (element) {
-      result.set(element,pos);
-      pos += element.length;
-    });
-
-    return result;
-  },
+  concat: stream.concat,
 
   /**
-   * Deep copy Uint8Array
-   * @function module:util.copyUint8Array
-   * @param {Uint8Array} Array to copy
-   * @return {Uint8Array} new Uint8Array
+   * Concat Uint8Arrays
+   * @param {Array<Uint8Array>} Array - Of Uint8Arrays to concatenate
+   * @returns {Uint8Array} Concatenated array.
    */
-  copyUint8Array: function (array) {
-    if(!Uint8Array.prototype.isPrototypeOf(array)) {
-      throw new Error('Data must be in the form of a Uint8Array');
-    }
-
-    var copy = new Uint8Array(array.length);
-    copy.set(array);
-    return copy;
-  },
+  concatUint8Array: stream.concatUint8Array,
 
   /**
    * Check Uint8Array equality
-   * @function module:util.equalsUint8Array
-   * @param {Uint8Array} first array
-   * @param {Uint8Array} second array
-   * @return {Boolean} equality
+   * @param {Uint8Array} array1 - First array
+   * @param {Uint8Array} array2 - Second array
+   * @returns {Boolean} Equality.
    */
   equalsUint8Array: function (array1, array2) {
-    if(!Uint8Array.prototype.isPrototypeOf(array1) || !Uint8Array.prototype.isPrototypeOf(array2)) {
+    if (!util.isUint8Array(array1) || !util.isUint8Array(array2)) {
       throw new Error('Data must be in the form of a Uint8Array');
     }
 
-    if(array1.length !== array2.length) {
+    if (array1.length !== array2.length) {
       return false;
     }
 
-    for(var i = 0; i < array1.length; i++) {
-      if(array1[i] !== array2[i]) {
+    for (let i = 0; i < array1.length; i++) {
+      if (array1[i] !== array2[i]) {
         return false;
       }
     }
@@ -350,190 +266,324 @@ export default {
   /**
    * Calculates a 16bit sum of a Uint8Array by adding each character
    * codes modulus 65535
-   * @param {Uint8Array} Uint8Array to create a sum of
-   * @return {Integer} An integer containing the sum of all character
-   * codes % 65535
+   * @param {Uint8Array} Uint8Array - To create a sum of
+   * @returns {Uint8Array} 2 bytes containing the sum of all charcodes % 65535.
    */
-  calc_checksum: function (text) {
-    var checksum = {
-      s: 0,
-      add: function (sadd) {
-        this.s = (this.s + sadd) % 65536;
-      }
-    };
-    for (var i = 0; i < text.length; i++) {
-      checksum.add(text[i]);
+  writeChecksum: function (text) {
+    let s = 0;
+    for (let i = 0; i < text.length; i++) {
+      s = (s + text[i]) & 0xFFFF;
     }
-    return checksum.s;
+    return util.writeNumber(s, 2);
   },
 
   /**
    * Helper function to print a debug message. Debug
    * messages are only printed if
-   * @link module:config/config.debug is set to true.
-   * @param {String} str String of the debug message
+   * @param {String} str - String of the debug message
    */
-  print_debug: function (str) {
-    if (config.debug) {
+  printDebug: function (str) {
+    if (debugMode) {
       console.log(str);
     }
   },
 
   /**
-   * Helper function to print a debug message. Debug
+   * Helper function to print a debug error. Debug
    * messages are only printed if
-   * @link module:config/config.debug is set to true.
-   * Different than print_debug because will call hexstrdump iff necessary.
-   * @param {String} str String of the debug message
+   * @param {String} str - String of the debug message
    */
-  print_debug_hexstr_dump: function (str, strToHex) {
-    if (config.debug) {
-      str = str + this.hexstrdump(strToHex);
-      console.log(str);
+  printDebugError: function (error) {
+    if (debugMode) {
+      console.error(error);
     }
   },
 
-  getLeftNBits: function (string, bitcount) {
-    var rest = bitcount % 8;
-    if (rest === 0) {
-      return string.substring(0, bitcount / 8);
+  // returns bit length of the integer x
+  nbits: function (x) {
+    let r = 1;
+    let t = x >>> 16;
+    if (t !== 0) {
+      x = t;
+      r += 16;
     }
-    var bytes = (bitcount - rest) / 8 + 1;
-    var result = string.substring(0, bytes);
-    return this.shiftRight(result, 8 - rest); // +String.fromCharCode(string.charCodeAt(bytes -1) << (8-rest) & 0xFF);
+    t = x >> 8;
+    if (t !== 0) {
+      x = t;
+      r += 8;
+    }
+    t = x >> 4;
+    if (t !== 0) {
+      x = t;
+      r += 4;
+    }
+    t = x >> 2;
+    if (t !== 0) {
+      x = t;
+      r += 2;
+    }
+    t = x >> 1;
+    if (t !== 0) {
+      x = t;
+      r += 1;
+    }
+    return r;
   },
 
   /**
-   * Shifting a string to n bits right
-   * @param {String} value The string to shift
-   * @param {Integer} bitcount Amount of bits to shift (MUST be smaller
-   * than 9)
-   * @return {String} Resulting string.
+   * If S[1] == 0, then double(S) == (S[2..128] || 0);
+   * otherwise, double(S) == (S[2..128] || 0) xor
+   * (zeros(120) || 10000111).
+   *
+   * Both OCB and EAX (through CMAC) require this function to be constant-time.
+   *
+   * @param {Uint8Array} data
    */
-  shiftRight: function (value, bitcount) {
-    var temp = this.str2bin(value);
-    if (bitcount % 8 !== 0) {
-      for (var i = temp.length - 1; i >= 0; i--) {
-        temp[i] >>= bitcount % 8;
+  double: function(data) {
+    const doubleVar = new Uint8Array(data.length);
+    const last = data.length - 1;
+    for (let i = 0; i < last; i++) {
+      doubleVar[i] = (data[i] << 1) ^ (data[i + 1] >> 7);
+    }
+    doubleVar[last] = (data[last] << 1) ^ ((data[0] >> 7) * 0x87);
+    return doubleVar;
+  },
+
+  /**
+   * Shift a Uint8Array to the right by n bits
+   * @param {Uint8Array} array - The array to shift
+   * @param {Integer} bits - Amount of bits to shift (MUST be smaller
+   * than 8)
+   * @returns {String} Resulting array.
+   */
+  shiftRight: function (array, bits) {
+    if (bits) {
+      for (let i = array.length - 1; i >= 0; i--) {
+        array[i] >>= bits;
         if (i > 0) {
-          temp[i] |= (temp[i - 1] << (8 - (bitcount % 8))) & 0xFF;
+          array[i] |= (array[i - 1] << (8 - bits));
         }
       }
-    } else {
-      return value;
     }
-    return this.bin2str(temp);
+    return array;
   },
 
   /**
-   * Return the algorithm type as string
-   * @return {String} String representing the message type
-   */
-  get_hashAlgorithmString: function (algo) {
-    switch (algo) {
-      case 1:
-        return "MD5";
-      case 2:
-        return "SHA1";
-      case 3:
-        return "RIPEMD160";
-      case 8:
-        return "SHA256";
-      case 9:
-        return "SHA384";
-      case 10:
-        return "SHA512";
-      case 11:
-        return "SHA224";
-    }
-    return "unknown";
-  },
-
-  /**
-   * Get native Web Cryptography api. The default configuration is to use
-   * the api when available. But it can also be deactivated with config.useNative
-   * @return {Object}   The SubtleCrypto api or 'undefined'
+   * Get native Web Cryptography api, only the current version of the spec.
+   * @returns {Object} The SubtleCrypto api or 'undefined'.
    */
   getWebCrypto: function() {
-    if (!config.useNative) {
-      return;
-    }
-
-    if (typeof window !== 'undefined') {
-      if (window.crypto) {
-        return window.crypto.subtle || window.crypto.webkitSubtle;
-      }
-      if (window.msCrypto) {
-        return window.msCrypto.subtle;
-      }
-    }
-  },
-
-  /**
-   * Wraps a generic synchronous function in an ES6 Promise.
-   * @param  {Function} fn  The function to be wrapped
-   * @return {Function}     The function wrapped in a Promise
-   */
-  promisify: function(fn) {
-    return function() {
-      var args = arguments;
-      return new Promise(function(resolve) {
-        var result = fn.apply(null, args);
-        resolve(result);
-      });
-    };
-  },
-
-  /**
-   * Converts an IE11 web crypro api result to a promise.
-   *   This is required since IE11 implements an old version of the
-   *   Web Crypto specification that does not use promises.
-   * @param  {Object} cryptoOp The return value of an IE11 web cryptro api call
-   * @param  {String} errmsg   An error message for a specific operation
-   * @return {Promise}         The resulting Promise
-   */
-  promisifyIE11Op: function(cryptoOp, errmsg) {
-    return new Promise(function(resolve, reject) {
-      cryptoOp.onerror = function () {
-        reject(new Error(errmsg));
-      };
-      cryptoOp.oncomplete = function (e) {
-        resolve(e.target.result);
-      };
-    });
+    return typeof globalThis !== 'undefined' && globalThis.crypto && globalThis.crypto.subtle;
   },
 
   /**
    * Detect Node.js runtime.
    */
   detectNode: function() {
-    return typeof window === 'undefined';
+    return typeof globalThis.process === 'object' &&
+      typeof globalThis.process.versions === 'object';
   },
 
   /**
-   * Get native Node.js crypto api. The default configuration is to use
-   * the api when available. But it can also be deactivated with config.useNative
-   * @return {Object}   The crypto module or 'undefined'
+   * Detect native BigInt support
+   */
+  detectBigInt: () => typeof BigInt !== 'undefined',
+
+  /**
+   * Get BigInteger class
+   * It wraps the native BigInt type if it's available
+   * Otherwise it relies on bn.js
+   * @returns {BigInteger}
+   * @async
+   */
+  getBigInteger,
+
+  /**
+   * Get native Node.js crypto api.
+   * @returns {Object} The crypto module or 'undefined'.
    */
   getNodeCrypto: function() {
-    if (!this.detectNode() || !config.useNative) {
-      return;
-    }
+    return require('crypto');
+  },
 
-    return null;
+  getNodeZlib: function() {
+    return require('zlib');
   },
 
   /**
    * Get native Node.js Buffer constructor. This should be used since
    * Buffer is not available under browserify.
-   * @return {Function}   The Buffer constructor or 'undefined'
+   * @returns {Function} The Buffer constructor or 'undefined'.
    */
   getNodeBuffer: function() {
-    if (!this.detectNode()) {
-      return;
+    return (require('buffer') || {}).Buffer;
+  },
+
+  getHardwareConcurrency: function() {
+    if (util.detectNode()) {
+      const os = require('os');
+      return os.cpus().length;
     }
 
-    return require('buffer').Buffer;
-  }
+    return navigator.hardwareConcurrency || 1;
+  },
 
+  isEmailAddress: function(data) {
+    if (!util.isString(data)) {
+      return false;
+    }
+    const re = /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+([a-zA-Z]{2,}|xn--[a-zA-Z\-0-9]+)))$/;
+    return re.test(data);
+  },
+
+  /**
+   * Normalize line endings to <CR><LF>
+   * Support any encoding where CR=0x0D, LF=0x0A
+   */
+  canonicalizeEOL: function(data) {
+    const CR = 13;
+    const LF = 10;
+    let carryOverCR = false;
+
+    return stream.transform(data, bytes => {
+      if (carryOverCR) {
+        bytes = util.concatUint8Array([new Uint8Array([CR]), bytes]);
+      }
+
+      if (bytes[bytes.length - 1] === CR) {
+        carryOverCR = true;
+        bytes = bytes.subarray(0, -1);
+      } else {
+        carryOverCR = false;
+      }
+
+      let index;
+      const indices = [];
+      for (let i = 0; ; i = index) {
+        index = bytes.indexOf(LF, i) + 1;
+        if (index) {
+          if (bytes[index - 2] !== CR) indices.push(index);
+        } else {
+          break;
+        }
+      }
+      if (!indices.length) {
+        return bytes;
+      }
+
+      const normalized = new Uint8Array(bytes.length + indices.length);
+      let j = 0;
+      for (let i = 0; i < indices.length; i++) {
+        const sub = bytes.subarray(indices[i - 1] || 0, indices[i]);
+        normalized.set(sub, j);
+        j += sub.length;
+        normalized[j - 1] = CR;
+        normalized[j] = LF;
+        j++;
+      }
+      normalized.set(bytes.subarray(indices[indices.length - 1] || 0), j);
+      return normalized;
+    }, () => (carryOverCR ? new Uint8Array([CR]) : undefined));
+  },
+
+  /**
+   * Convert line endings from canonicalized <CR><LF> to native <LF>
+   * Support any encoding where CR=0x0D, LF=0x0A
+   */
+  nativeEOL: function(data) {
+    const CR = 13;
+    const LF = 10;
+    let carryOverCR = false;
+
+    return stream.transform(data, bytes => {
+      if (carryOverCR && bytes[0] !== LF) {
+        bytes = util.concatUint8Array([new Uint8Array([CR]), bytes]);
+      } else {
+        bytes = new Uint8Array(bytes); // Don't mutate passed bytes
+      }
+
+      if (bytes[bytes.length - 1] === CR) {
+        carryOverCR = true;
+        bytes = bytes.subarray(0, -1);
+      } else {
+        carryOverCR = false;
+      }
+
+      let index;
+      let j = 0;
+      for (let i = 0; i !== bytes.length; i = index) {
+        index = bytes.indexOf(CR, i) + 1;
+        if (!index) index = bytes.length;
+        const last = index - (bytes[index] === LF ? 1 : 0);
+        if (i) bytes.copyWithin(j, i, last);
+        j += last - i;
+      }
+      return bytes.subarray(0, j);
+    }, () => (carryOverCR ? new Uint8Array([CR]) : undefined));
+  },
+
+  /**
+   * Remove trailing spaces and tabs from each line
+   */
+  removeTrailingSpaces: function(text) {
+    return text.split('\n').map(line => {
+      let i = line.length - 1;
+      for (; i >= 0 && (line[i] === ' ' || line[i] === '\t'); i--);
+      return line.substr(0, i + 1);
+    }).join('\n');
+  },
+
+  wrapError: function(message, error) {
+    if (!error) {
+      return new Error(message);
+    }
+
+    // update error message
+    try {
+      error.message = message + ': ' + error.message;
+    } catch (e) {}
+
+    return error;
+  },
+
+  /**
+   * Map allowed packet tags to corresponding classes
+   * Meant to be used to format `allowedPacket` for Packetlist.read
+   * @param {Array<Object>} allowedClasses
+   * @returns {Object} map from enum.packet to corresponding *Packet class
+   */
+  constructAllowedPackets: function(allowedClasses) {
+    const map = {};
+    allowedClasses.forEach(PacketClass => {
+      if (!PacketClass.tag) {
+        throw new Error('Invalid input: expected a packet class');
+      }
+      map[PacketClass.tag] = PacketClass;
+    });
+    return map;
+  },
+
+  /**
+   * Return a Promise that will resolve as soon as one of the promises in input resolves
+   * or will reject if all input promises all rejected
+   * (similar to Promise.any, but with slightly different error handling)
+   * @param {Array<Promise>} promises
+   * @return {Promise<Any>} Promise resolving to the result of the fastest fulfilled promise
+   *                          or rejected with the Error of the last resolved Promise (if all promises are rejected)
+   */
+  anyPromise: function(promises) {
+    return new Promise(async (resolve, reject) => {
+      let exception;
+      await Promise.all(promises.map(async promise => {
+        try {
+          resolve(await promise);
+        } catch (e) {
+          exception = e;
+        }
+      }));
+      reject(exception);
+    });
+  }
 };
+
+export default util;

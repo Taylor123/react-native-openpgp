@@ -14,115 +14,184 @@
 // You should have received a copy of the GNU Lesser General Public
 // License along with this library; if not, write to the Free Software
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
-//
-// A Digital signature algorithm implementation
 
 /**
- * @requires crypto/hash
- * @requires crypto/public_key/jsbn
- * @requires crypto/random
- * @requires util
+ * @fileoverview A Digital signature algorithm implementation
  * @module crypto/public_key/dsa
+ * @private
  */
+import { getRandomBigInteger } from '../random';
+import util from '../../util';
+import { isProbablePrime } from './prime';
 
-'use strict';
+/*
+  TODO regarding the hash function, read:
+   https://tools.ietf.org/html/rfc4880#section-13.6
+   https://tools.ietf.org/html/rfc4880#section-14
+*/
 
-import BigInteger from './jsbn.js';
-import random from '../random.js';
-import hashModule from '../hash';
-import util from '../../util.js';
-import config from '../../config';
+/**
+ * DSA Sign function
+ * @param {Integer} hashAlgo
+ * @param {Uint8Array} hashed
+ * @param {Uint8Array} g
+ * @param {Uint8Array} p
+ * @param {Uint8Array} q
+ * @param {Uint8Array} x
+ * @returns {Promise<{ r: Uint8Array, s: Uint8Array }>}
+ * @async
+ */
+export async function sign(hashAlgo, hashed, g, p, q, x) {
+  const BigInteger = await util.getBigInteger();
+  const one = new BigInteger(1);
+  p = new BigInteger(p);
+  q = new BigInteger(q);
+  g = new BigInteger(g);
+  x = new BigInteger(x);
 
-export default function DSA() {
-  // s1 = ((g**s) mod p) mod q
-  // s1 = ((s**-1)*(sha-1(m)+(s1*x) mod q)
-  function sign(hashalgo, m, g, p, q, x) {
-    // If the output size of the chosen hash is larger than the number of
-    // bits of q, the hash result is truncated to fit by taking the number
-    // of leftmost bits equal to the number of bits of q.  This (possibly
-    // truncated) hash function result is treated as a number and used
-    // directly in the DSA signature algorithm.
-    var hashed_data = util.getLeftNBits(util.Uint8Array2str(hashModule.digest(hashalgo, util.str2Uint8Array(m))), q.bitLength());
-    var hash = new BigInteger(util.hexstrdump(hashed_data), 16);
-    // FIPS-186-4, section 4.6:
-    // The values of r and s shall be checked to determine if r = 0 or s = 0.
-    // If either r = 0 or s = 0, a new value of k shall be generated, and the
-    // signature shall be recalculated. It is extremely unlikely that r = 0
-    // or s = 0 if signatures are generated properly.
-    var k, s1, s2;
-    while (true) {
-      k = random.getRandomBigIntegerInRange(BigInteger.ONE, q.subtract(BigInteger.ONE));
-      s1 = (g.modPow(k, p)).mod(q);
-      s2 = (k.modInverse(q).multiply(hash.add(x.multiply(s1)))).mod(q);
-      if (s1 !== 0 && s2 !== 0) {
-        break;
-      }
+  let k;
+  let r;
+  let s;
+  let t;
+  g = g.mod(p);
+  x = x.mod(q);
+  // If the output size of the chosen hash is larger than the number of
+  // bits of q, the hash result is truncated to fit by taking the number
+  // of leftmost bits equal to the number of bits of q.  This (possibly
+  // truncated) hash function result is treated as a number and used
+  // directly in the DSA signature algorithm.
+  const h = new BigInteger(hashed.subarray(0, q.byteLength())).mod(q);
+  // FIPS-186-4, section 4.6:
+  // The values of r and s shall be checked to determine if r = 0 or s = 0.
+  // If either r = 0 or s = 0, a new value of k shall be generated, and the
+  // signature shall be recalculated. It is extremely unlikely that r = 0
+  // or s = 0 if signatures are generated properly.
+  while (true) {
+    // See Appendix B here: https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.186-4.pdf
+    k = await getRandomBigInteger(one, q); // returns in [1, q-1]
+    r = g.modExp(k, p).imod(q); // (g**k mod p) mod q
+    if (r.isZero()) {
+      continue;
     }
-    var result = [];
-    result[0] = s1.toMPI();
-    result[1] = s2.toMPI();
-    return result;
+    const xr = x.mul(r).imod(q);
+    t = h.add(xr).imod(q); // H(m) + x*r mod q
+    s = k.modInv(q).imul(t).imod(q); // k**-1 * (H(m) + x*r) mod q
+    if (s.isZero()) {
+      continue;
+    }
+    break;
+  }
+  return {
+    r: r.toUint8Array('be', q.byteLength()),
+    s: s.toUint8Array('be', q.byteLength())
+  };
+}
+
+/**
+ * DSA Verify function
+ * @param {Integer} hashAlgo
+ * @param {Uint8Array} r
+ * @param {Uint8Array} s
+ * @param {Uint8Array} hashed
+ * @param {Uint8Array} g
+ * @param {Uint8Array} p
+ * @param {Uint8Array} q
+ * @param {Uint8Array} y
+ * @returns {boolean}
+ * @async
+ */
+export async function verify(hashAlgo, r, s, hashed, g, p, q, y) {
+  const BigInteger = await util.getBigInteger();
+  const zero = new BigInteger(0);
+  r = new BigInteger(r);
+  s = new BigInteger(s);
+
+  p = new BigInteger(p);
+  q = new BigInteger(q);
+  g = new BigInteger(g);
+  y = new BigInteger(y);
+
+  if (r.lte(zero) || r.gte(q) ||
+      s.lte(zero) || s.gte(q)) {
+    util.printDebug("invalid DSA Signature");
+    return false;
+  }
+  const h = new BigInteger(hashed.subarray(0, q.byteLength())).imod(q);
+  const w = s.modInv(q); // s**-1 mod q
+  if (w.isZero()) {
+    util.printDebug("invalid DSA Signature");
+    return false;
   }
 
-  function select_hash_algorithm(q) {
-    var usersetting = config.prefer_hash_algorithm;
-    /*
-     * 1024-bit key, 160-bit q, SHA-1, SHA-224, SHA-256, SHA-384, or SHA-512 hash
-     * 2048-bit key, 224-bit q, SHA-224, SHA-256, SHA-384, or SHA-512 hash
-     * 2048-bit key, 256-bit q, SHA-256, SHA-384, or SHA-512 hash
-     * 3072-bit key, 256-bit q, SHA-256, SHA-384, or SHA-512 hash
-     */
-    switch (Math.round(q.bitLength() / 8)) {
-      case 20:
-        // 1024 bit
-        if (usersetting !== 2 &&
-          usersetting > 11 &&
-          usersetting !== 10 &&
-          usersetting < 8) {
-          return 2; // prefer sha1
-        }
-        return usersetting;
-      case 28:
-        // 2048 bit
-        if (usersetting > 11 &&
-          usersetting < 8) {
-          return 11;
-        }
-        return usersetting;
-      case 32:
-        // 4096 bit // prefer sha224
-        if (usersetting > 10 &&
-          usersetting < 8) {
-          return 8; // prefer sha256
-        }
-        return usersetting;
-      default:
-        util.print_debug("DSA select hash algorithm: returning null for an unknown length of q");
-        return null;
-    }
-  }
-  this.select_hash_algorithm = select_hash_algorithm;
+  g = g.mod(p);
+  y = y.mod(p);
+  const u1 = h.mul(w).imod(q); // H(m) * w mod q
+  const u2 = r.mul(w).imod(q); // r * w mod q
+  const t1 = g.modExp(u1, p); // g**u1 mod p
+  const t2 = y.modExp(u2, p); // y**u2 mod p
+  const v = t1.mul(t2).imod(p).imod(q); // (g**u1 * y**u2 mod p) mod q
+  return v.equal(r);
+}
 
-  function verify(hashalgo, s1, s2, m, p, q, g, y) {
-    var hashed_data = util.getLeftNBits(util.Uint8Array2str(hashModule.digest(hashalgo, util.str2Uint8Array(m))), q.bitLength());
-    var hash = new BigInteger(util.hexstrdump(hashed_data), 16);
-    if (BigInteger.ZERO.compareTo(s1) >= 0 ||
-      s1.compareTo(q) >= 0 ||
-      BigInteger.ZERO.compareTo(s2) >= 0 ||
-      s2.compareTo(q) >= 0) {
-      util.print_debug("invalid DSA Signature");
-      return null;
-    }
-    var w = s2.modInverse(q);
-    if (BigInteger.ZERO.compareTo(w) === 0) {
-      util.print_debug("invalid DSA Signature");
-      return null;
-    }
-    var u1 = hash.multiply(w).mod(q);
-    var u2 = s1.multiply(w).mod(q);
-    return g.modPow(u1, p).multiply(y.modPow(u2, p)).mod(p).mod(q);
+/**
+ * Validate DSA parameters
+ * @param {Uint8Array} p - DSA prime
+ * @param {Uint8Array} q - DSA group order
+ * @param {Uint8Array} g - DSA sub-group generator
+ * @param {Uint8Array} y - DSA public key
+ * @param {Uint8Array} x - DSA private key
+ * @returns {Promise<Boolean>} Whether params are valid.
+ * @async
+ */
+export async function validateParams(p, q, g, y, x) {
+  const BigInteger = await util.getBigInteger();
+  p = new BigInteger(p);
+  q = new BigInteger(q);
+  g = new BigInteger(g);
+  y = new BigInteger(y);
+  const one = new BigInteger(1);
+  // Check that 1 < g < p
+  if (g.lte(one) || g.gte(p)) {
+    return false;
   }
 
-  this.sign = sign;
-  this.verify = verify;
+  /**
+   * Check that subgroup order q divides p-1
+   */
+  if (!p.dec().mod(q).isZero()) {
+    return false;
+  }
+
+  /**
+   * g has order q
+   * Check that g ** q = 1 mod p
+   */
+  if (!g.modExp(q, p).isOne()) {
+    return false;
+  }
+
+  /**
+   * Check q is large and probably prime (we mainly want to avoid small factors)
+   */
+  const qSize = new BigInteger(q.bitLength());
+  const n150 = new BigInteger(150);
+  if (qSize.lt(n150) || !(await isProbablePrime(q, null, 32))) {
+    return false;
+  }
+
+  /**
+   * Re-derive public key y' = g ** x mod p
+   * Expect y == y'
+   *
+   * Blinded exponentiation computes g**{rq + x} to compare to y
+   */
+  x = new BigInteger(x);
+  const two = new BigInteger(2);
+  const r = await getRandomBigInteger(two.leftShift(qSize.dec()), two.leftShift(qSize)); // draw r of same size as q
+  const rqx = q.mul(r).add(x);
+  if (!y.equal(g.modExp(rqx, p))) {
+    return false;
+  }
+
+  return true;
 }

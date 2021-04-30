@@ -1,203 +1,177 @@
+import * as stream from '@openpgp/web-stream-tools';
+import {
+  readPackets, supportsStreaming,
+  writeTag, writeHeader,
+  writePartialLength, writeSimpleLength
+} from './packet';
+import util from '../util';
+import enums from '../enums';
+import defaultConfig from '../config';
+
+/**
+ * Instantiate a new packet given its tag
+ * @function newPacketFromTag
+ * @param {module:enums.packet} tag - Property value from {@link module:enums.packet}
+ * @param {Object} allowedPackets - mapping where keys are allowed packet tags, pointing to their Packet class
+ * @returns {Object} New packet object with type based on tag
+ */
+export function newPacketFromTag(tag, allowedPackets) {
+  if (!allowedPackets[tag]) {
+    throw new Error(`Packet not allowed in this context: ${enums.read(enums.packets, tag)}`);
+  }
+  return new allowedPackets[tag]();
+}
+
 /**
  * This class represents a list of openpgp packets.
  * Take care when iterating over it - the packets themselves
  * are stored as numerical indices.
- * @requires util
- * @requires enums
- * @requires packet
- * @requires packet/packet
- * @module packet/packetlist
+ * @extends Array
  */
-
-'use strict';
-
-import util from '../util';
-import packetParser from './packet.js';
-import * as packets from './all_packets.js';
-import enums from '../enums.js';
-
-/**
- * @constructor
- */
-export default function Packetlist() {
-  /** The number of packets contained within the list.
-   * @readonly
-   * @type {Integer} */
-  this.length = 0;
-}
-/**
- * Reads a stream of binary data and interprents it as a list of packets.
- * @param {Uint8Array} A Uint8Array of bytes.
- */
-Packetlist.prototype.read = function (bytes) {
-  var i = 0;
-
-  while (i < bytes.length) {
-    var parsed = packetParser.read(bytes, i, bytes.length - i);
-    i = parsed.offset;
-
-    var tag = enums.read(enums.packet, parsed.tag);
-    var packet = packets.newPacketFromTag(tag);
-
-    this.push(packet);
-    packet.read(parsed.packet);
-  }
-};
-
-/**
- * Creates a binary representation of openpgp objects contained within the
- * class instance.
- * @returns {Uint8Array} A Uint8Array containing valid openpgp packets.
- */
-Packetlist.prototype.write = function () {
-  var arr = [];
-
-  for (var i = 0; i < this.length; i++) {
-    var packetbytes = this[i].write();
-    arr.push(packetParser.writeHeader(this[i].tag, packetbytes.length));
-    arr.push(packetbytes);
-  }
-
-  return util.concatUint8Array(arr);
-};
-
-/**
- * Adds a packet to the list. This is the only supported method of doing so;
- * writing to packetlist[i] directly will result in an error.
- */
-Packetlist.prototype.push = function (packet) {
-  if (!packet) {
-    return;
-  }
-
-  packet.packets = packet.packets || new Packetlist();
-
-  this[this.length] = packet;
-  this.length++;
-};
-
-/**
-* Creates a new PacketList with all packets that pass the test implemented by the provided function.
-*/
-Packetlist.prototype.filter = function (callback) {
-
-  var filtered = new Packetlist();
-
-  for (var i = 0; i < this.length; i++) {
-    if (callback(this[i], i, this)) {
-      filtered.push(this[i]);
-    }
-  }
-
-  return filtered;
-};
-
-/**
-* Creates a new PacketList with all packets from the given types
-*/
-Packetlist.prototype.filterByTag = function () {
-  var args = Array.prototype.slice.call(arguments);
-  var filtered = new Packetlist();
-  var that = this;
-
-  function handle(packetType) {return that[i].tag === packetType;}
-  for (var i = 0; i < this.length; i++) {
-    if (args.some(handle)) {
-      filtered.push(this[i]);
-    }
-  }
-  return filtered;
-};
-
-/**
-* Executes the provided callback once for each element
-*/
-Packetlist.prototype.forEach = function (callback) {
-  for (var i = 0; i < this.length; i++) {
-    callback(this[i]);
-  }
-};
-
-/**
- * Traverses packet tree and returns first matching packet
- * @param  {module:enums.packet} type The packet type
- * @return {module:packet/packet|null}
- */
-Packetlist.prototype.findPacket = function (type) {
-  var packetlist = this.filterByTag(type);
-  if (packetlist.length) {
-    return packetlist[0];
-  } else {
-    var found = null;
-    for (var i = 0; i < this.length; i++) {
-      if (this[i].packets.length) {
-        found = this[i].packets.findPacket(type);
-        if (found) {
-          return found;
+class PacketList extends Array {
+  /**
+   * Reads a stream of binary data and interprets it as a list of packets.
+   * @param {Uint8Array | ReadableStream<Uint8Array>} bytes - A Uint8Array of bytes.
+   */
+  async read(bytes, allowedPackets, config = defaultConfig) {
+    this.stream = stream.transformPair(bytes, async (readable, writable) => {
+      const writer = stream.getWriter(writable);
+      try {
+        while (true) {
+          await writer.ready;
+          const done = await readPackets(readable, async parsed => {
+            try {
+              const packet = newPacketFromTag(parsed.tag, allowedPackets);
+              packet.packets = new PacketList();
+              packet.fromStream = util.isStream(parsed.packet);
+              await packet.read(parsed.packet, config);
+              await writer.write(packet);
+            } catch (e) {
+              if (!config.tolerant || supportsStreaming(parsed.tag)) {
+                // The packets that support streaming are the ones that contain
+                // message data. Those are also the ones we want to be more strict
+                // about and throw on parse errors for.
+                await writer.abort(e);
+              }
+              util.printDebugError(e);
+            }
+          });
+          if (done) {
+            await writer.ready;
+            await writer.close();
+            return;
+          }
         }
+      } catch (e) {
+        await writer.abort(e);
+      }
+    });
+
+    // Wait until first few packets have been read
+    const reader = stream.getReader(this.stream);
+    while (true) {
+      const { done, value } = await reader.read();
+      if (!done) {
+        this.push(value);
+      } else {
+        this.stream = null;
+      }
+      if (done || supportsStreaming(value.constructor.tag)) {
+        break;
       }
     }
+    reader.releaseLock();
   }
-  return null;
-};
 
-/**
- * Returns array of found indices by tag
- */
-Packetlist.prototype.indexOfTag = function () {
-  var args = Array.prototype.slice.call(arguments);
-  var tagIndex = [];
-  var that = this;
+  /**
+   * Creates a binary representation of openpgp objects contained within the
+   * class instance.
+   * @returns {Uint8Array} A Uint8Array containing valid openpgp packets.
+   */
+  write() {
+    const arr = [];
 
-  function handle(packetType) {return that[i].tag === packetType;}
-  for (var i = 0; i < this.length; i++) {
-    if (args.some(handle)) {
-      tagIndex.push(i);
+    for (let i = 0; i < this.length; i++) {
+      const packetbytes = this[i].write();
+      if (util.isStream(packetbytes) && supportsStreaming(this[i].constructor.tag)) {
+        let buffer = [];
+        let bufferLength = 0;
+        const minLength = 512;
+        arr.push(writeTag(this[i].constructor.tag));
+        arr.push(stream.transform(packetbytes, value => {
+          buffer.push(value);
+          bufferLength += value.length;
+          if (bufferLength >= minLength) {
+            const powerOf2 = Math.min(Math.log(bufferLength) / Math.LN2 | 0, 30);
+            const chunkSize = 2 ** powerOf2;
+            const bufferConcat = util.concat([writePartialLength(powerOf2)].concat(buffer));
+            buffer = [bufferConcat.subarray(1 + chunkSize)];
+            bufferLength = buffer[0].length;
+            return bufferConcat.subarray(0, 1 + chunkSize);
+          }
+        }, () => util.concat([writeSimpleLength(bufferLength)].concat(buffer))));
+      } else {
+        if (util.isStream(packetbytes)) {
+          let length = 0;
+          arr.push(stream.transform(stream.clone(packetbytes), value => {
+            length += value.length;
+          }, () => writeHeader(this[i].constructor.tag, length)));
+        } else {
+          arr.push(writeHeader(this[i].constructor.tag, packetbytes.length));
+        }
+        arr.push(packetbytes);
+      }
     }
-  }
-  return tagIndex;
-};
 
-/**
- * Returns slice of packetlist
- */
-Packetlist.prototype.slice = function (begin, end) {
-  if (!end) {
-    end = this.length;
+    return util.concat(arr);
   }
-  var part = new Packetlist();
-  for (var i = begin; i < end; i++) {
-    part.push(this[i]);
-  }
-  return part;
-};
 
-/**
- * Concatenates packetlist or array of packets
- */
-Packetlist.prototype.concat = function (packetlist) {
-  if (packetlist) {
-    for (var i = 0; i < packetlist.length; i++) {
-      this.push(packetlist[i]);
+  /**
+   * Creates a new PacketList with all packets matching the given tag(s)
+   * @param {...module:enums.packet} tags - packet tags to look for
+   * @returns {PacketList}
+   */
+  filterByTag(...tags) {
+    const filtered = new PacketList();
+
+    const handle = tag => packetType => tag === packetType;
+
+    for (let i = 0; i < this.length; i++) {
+      if (tags.some(handle(this[i].constructor.tag))) {
+        filtered.push(this[i]);
+      }
     }
-  }
-};
 
-/**
- * Allocate a new packetlist from structured packetlist clone
- * See {@link http://www.w3.org/html/wg/drafts/html/master/infrastructure.html#safe-passing-of-structured-data}
- * @param {Object} packetClone packetlist clone
- * @returns {Object} new packetlist object with data from packetlist clone
- */
-Packetlist.fromStructuredClone = function(packetlistClone) {
-  var packetlist = new Packetlist();
-  for (var i = 0; i < packetlistClone.length; i++) {
-    packetlist.push(packets.fromStructuredClone(packetlistClone[i]));
-    if (packetlist[i].packets.length !== 0) {
-      packetlist[i].packets = this.fromStructuredClone(packetlist[i].packets);
-    } else {
-      packetlist[i].packets = new Packetlist();
-    }
+    return filtered;
   }
-  return packetlist;
-};
+
+  /**
+   * Traverses packet list and returns first packet with matching tag
+   * @param {module:enums.packet} tag - The packet tag
+   * @returns {Packet|undefined}
+   */
+  findPacket(tag) {
+    return this.find(packet => packet.constructor.tag === tag);
+  }
+
+  /**
+   * Find indices of packets with the given tag(s)
+   * @param {...module:enums.packet} tags - packet tags to look for
+   * @returns {Integer[]} packet indices
+   */
+  indexOfTag(...tags) {
+    const tagIndex = [];
+    const that = this;
+
+    const handle = tag => packetType => tag === packetType;
+
+    for (let i = 0; i < this.length; i++) {
+      if (tags.some(handle(that[i].constructor.tag))) {
+        tagIndex.push(i);
+      }
+    }
+    return tagIndex;
+  }
+}
+
+export default PacketList;
